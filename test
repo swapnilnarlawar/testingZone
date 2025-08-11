@@ -1,0 +1,88 @@
+#!/bin/sh
+set -e
+
+# Check AZURE_CLIENT_ID env var
+if [ -z "$AZURE_CLIENT_ID" ]; then
+  echo "[ERROR] AZURE_CLIENT_ID is not set. Please set it before starting Alloy."
+  exit 1
+fi
+
+echo "[INFO] Testing Azure Managed Identity login..."
+if ! az login --identity --username "$AZURE_CLIENT_ID" >/dev/null 2>&1; then
+  echo "[ERROR] Could not log in with UAMI (client_id=$AZURE_CLIENT_ID)."
+  echo "        Make sure the identity is assigned to this pod and has SQL DB access."
+  exit 1
+fi
+
+echo "[INFO] Managed Identity login successful."
+
+echo "[INFO] Testing Azure SQL DB connectivity..."
+
+# Attempt a simple connection test with sqlcmd (make sure sqlcmd is in the container)
+if ! sqlcmd -S tcp:$SQL_SERVER_NAME.database.windows.net -d $SQL_DB_NAME -G -U "$AZURE_CLIENT_ID" -Q "SELECT 1" >/dev/null 2>&1; then
+  echo "[ERROR] Unable to connect to Azure SQL DB. Check permissions for UAMI on the database."
+  exit 1
+fi
+
+echo "[INFO] Azure SQL DB connectivity verified."
+
+# Start Alloy
+exec /bin/alloy "$@"
+
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-entrypoint
+data:
+  alloy-entrypoint.sh: |
+    #!/bin/sh
+    set -e
+
+    if [ -z "$AZURE_CLIENT_ID" ]; then
+      echo "[ERROR] AZURE_CLIENT_ID is not set. Please set it before starting Alloy."
+      exit 1
+    fi
+
+    echo "[INFO] Testing Azure Managed Identity login..."
+    if ! az login --identity --username "$AZURE_CLIENT_ID" >/dev/null 2>&1; then
+      echo "[ERROR] Could not log in with UAMI (client_id=$AZURE_CLIENT_ID)."
+      echo "        Make sure the identity is assigned to this pod and has SQL DB access."
+      exit 1
+    fi
+
+    echo "[INFO] Managed Identity login successful."
+
+    echo "[INFO] Testing Azure SQL DB connectivity..."
+
+    if ! sqlcmd -S tcp:$SQL_SERVER_NAME.database.windows.net -d $SQL_DB_NAME -G -U "$AZURE_CLIENT_ID" -Q "SELECT 1" >/dev/null 2>&1; then
+      echo "[ERROR] Unable to connect to Azure SQL DB. Check permissions for UAMI on the database."
+      exit 1
+    fi
+
+    echo "[INFO] Azure SQL DB connectivity verified."
+
+    exec /bin/alloy "$@"
+
+
+containers:
+  - name: alloy
+    image: grafana/alloy:latest
+    env:
+      - name: AZURE_CLIENT_ID
+        value: "12345678-abcd-1234-abcd-1234567890ab"
+      - name: SQL_SERVER_NAME
+        value: "<your-sql-server-name>"
+      - name: SQL_DB_NAME
+        value: "<your-database-name>"
+    volumeMounts:
+      - name: entrypoint-script
+        mountPath: /entrypoint.sh
+        subPath: alloy-entrypoint.sh
+        readOnly: true
+    command: ["/bin/sh", "/entrypoint.sh"]
+volumes:
+  - name: entrypoint-script
+    configMap:
+      name: alloy-entrypoint
+      defaultMode: 0755
