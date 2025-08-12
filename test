@@ -135,3 +135,80 @@ spec:
     targetPort: 9091
   type: ClusterIP
 
+
+
+
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-uami-pod
+  namespace: default
+spec:
+  serviceAccountName: debug-uami-sa
+  nodeSelector:
+    kubernetes.io/os: linux
+  containers:
+  - name: debug-container
+    image: mcr.microsoft.com/azure-cli:2.64.0
+    env:
+      - name: AZURE_CLIENT_ID
+        value: "<UAMI-CLIENT-ID>"
+      - name: AZURE_TENANT_ID
+        value: "<TENANT-ID>"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat <<'EOF' > /tmp/debug-identity.sh
+        #!/bin/sh
+
+        echo "=== Environment Variables ==="
+        echo "AZURE_CLIENT_ID: $AZURE_CLIENT_ID"
+        echo "AZURE_TENANT_ID: $AZURE_TENANT_ID"
+        echo "SERVICE ACCOUNT TOKEN FILES:"
+        ls -l /var/run/secrets/tokens || echo "No token files found"
+
+        echo
+        echo "=== Trying az login with managed identity ==="
+        if az login --identity --username "$AZURE_CLIENT_ID"; then
+          echo "Login succeeded"
+        else
+          echo "Login failed"
+          exit 1
+        fi
+
+        echo
+        echo "=== Getting access token for management.azure.com ==="
+        if az account get-access-token --resource https://management.azure.com/ --output json > /tmp/uami-token.json; then
+          echo "Token fetched successfully:"
+          cat /tmp/uami-token.json
+        else
+          echo "Failed to get access token"
+          exit 1
+        fi
+
+        echo
+        echo "=== Check mounted projected service account token ==="
+        TOKEN_FILE=$(find /var/run/secrets/tokens -type f 2>/dev/null | head -n1)
+        if [ -n "$TOKEN_FILE" ]; then
+          echo "Token file found: $TOKEN_FILE"
+          echo "Token contents:"
+          cat "$TOKEN_FILE"
+        else
+          echo "No token file found in /var/run/secrets/tokens"
+        fi
+
+        # Keep pod alive for manual inspection
+        sleep infinity
+        EOF
+
+        chmod +x /tmp/debug-identity.sh
+        /tmp/debug-identity.sh
+    volumeMounts:
+      - name: uami-token
+        mountPath: /var/run/secrets
+  volumes:
+    - name: uami-token
+      emptyDir: {}
+  restartPolicy: Never
