@@ -1,0 +1,64 @@
+import ch.cern.sparkmeasure.StageMetrics
+import io.prometheus.client.{CollectorRegistry, Gauge}
+import io.prometheus.client.exporter.PushGateway
+import org.apache.spark.sql.functions._
+import scala.collection.JavaConverters._
+
+// ----------------------
+// Initialize SparkMeasure Flight Recorder
+// ----------------------
+val sm = StageMetrics(spark, output = "/tmp/flight_recorder.json", appName = "SparkShellFlightRecorderFull")
+sm.begin()
+
+// ----------------------
+// Example Spark Job
+// ----------------------
+val df = spark.range(1000000).withColumn("square", col("id") * col("id"))
+df.agg(avg("square")).show()
+
+sm.end()
+println("Flight Recorder metrics saved to /tmp/flight_recorder.json")
+
+// ----------------------
+// Push detailed metrics to Pushgateway
+// ----------------------
+val pushGatewayURL = "http://pushgateway.example.com/metrics" // replace with your Ingress host
+val jobName = "spark_shell_full_flight_recorder"
+
+val registry = new CollectorRegistry()
+
+// Iterate over each stage
+sm.getStageMetrics().foreach { stage =>
+  val stageId = stage.stageId
+  val stageName = stage.name.replaceAll("[^a-zA-Z0-9_]", "_")  // sanitize name for Prometheus
+
+  // Number of tasks
+  val tasks = stage.tasks
+  val taskCountGauge = Gauge.build()
+    .name(s"spark_stage_${stageId}_task_count")
+    .help(s"Number of tasks in stage ${stageId}")
+    .register(registry)
+  taskCountGauge.set(tasks.length.toDouble)
+
+  // Total duration of all tasks in the stage
+  val totalDuration = tasks.map(_.duration).sum
+  val durationGauge = Gauge.build()
+    .name(s"spark_stage_${stageId}_total_duration_ms")
+    .help(s"Total task duration in milliseconds for stage ${stageId}")
+    .register(registry)
+  durationGauge.set(totalDuration.toDouble)
+
+  // Optional: push average task duration
+  val avgTaskDuration = if (tasks.nonEmpty) totalDuration / tasks.length else 0.0
+  val avgGauge = Gauge.build()
+    .name(s"spark_stage_${stageId}_avg_task_duration_ms")
+    .help(s"Average task duration in milliseconds for stage ${stageId}")
+    .register(registry)
+  avgGauge.set(avgTaskDuration)
+}
+
+// Push metrics to Pushgateway
+val pg = new PushGateway(pushGatewayURL)
+pg.pushAdd(registry, jobName)
+
+println(s"Detailed stage/task metrics pushed to Pushgateway at $pushGatewayURL/job/$jobName")
