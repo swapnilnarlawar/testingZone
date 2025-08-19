@@ -62,3 +62,27 @@ val pg = new PushGateway(pushGatewayURL)
 pg.pushAdd(registry, jobName)
 
 println(s"Detailed stage/task metrics pushed to Pushgateway at $pushGatewayURL/job/$jobName")
+
+
+
+#######
+// Example: push total number of stages
+// Note: StageMetrics 0.25 provides summary in report(), but we can parse JSON if needed
+import scala.io.Source
+import play.api.libs.json._
+
+val jsonString = Source.fromFile(outputFile).getLines.mkString
+val json = Json.parse(jsonString)
+val totalStages = (json \ "stages").as[Seq[JsValue]].length
+
+val stagesGauge = Gauge.build()
+  .name("spark_total_stages")
+  .help("Total stages executed")
+  .register(registry)
+stagesGauge.set(totalStages.toDouble)
+
+// Push metrics
+val pg = new PushGateway(pushGatewayURL)
+pg.pushAdd(registry, jobName)
+
+println(s"Metrics pushed to Pushgateway at $pushGatewayURL/job/$jobName")
