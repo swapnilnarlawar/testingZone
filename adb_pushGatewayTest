@@ -2,7 +2,6 @@ import ch.cern.sparkmeasure.StageMetrics
 import io.prometheus.client.{CollectorRegistry, Gauge}
 import io.prometheus.client.exporter.PushGateway
 import org.apache.spark.sql.functions._
-import scala.util.parsing.json._
 
 // ----------------------
 // Step 1: Initialize StageMetrics
@@ -21,64 +20,58 @@ sm.end()
 // ----------------------
 // Step 3: Capture Flight Recorder JSON
 // ----------------------
-// Redirect report() output to a string
 import java.io.{ByteArrayOutputStream, PrintStream}
-
 val baos = new ByteArrayOutputStream()
 val ps = new PrintStream(baos)
 val oldOut = Console.out
 Console.setOut(ps)
-sm.report()  // prints JSON to baos
+sm.report()  // prints JSON
 Console.setOut(oldOut)
 
 val jsonString = baos.toString
-
-// Optionally save to DBFS
+// Save to DBFS
 dbutils.fs.put("dbfs:/tmp/flight_recorder.json", jsonString, true)
 
 // ----------------------
-// Step 4: Parse JSON and push metrics to Pushgateway
+// Step 4: Parse JSON with Spark
 // ----------------------
-val parsed = JSON.parseFull(jsonString)
+val jsonDF = spark.read.option("multiline", "true").json(Seq(jsonString).toDS)
+jsonDF.show(false)  // check the structure
 
+// Extract stages
+val stagesDF = jsonDF.select(explode($"stages").alias("stage"))
+stagesDF.show(false)
+
+// ----------------------
+// Step 5: Push metrics to Pushgateway
+// ----------------------
 val registry = new CollectorRegistry()
 val pushGatewayURL = "http://pushgateway.example.com/metrics"
 val jobName = "spark_databricks_flight_recorder"
 
-// Iterate over stages and push simple metrics
-parsed match {
-  case Some(m: Map[String, Any]) =>
-    m.get("stages") match {
-      case Some(stages: List[Map[String, Any] @unchecked]) =>
-        stages.foreach { stage =>
-          val stageId = stage.getOrElse("stageId", 0).toString
-          val stageName = stage.getOrElse("name", "unknown").toString.replaceAll("[^a-zA-Z0-9_]", "_")
-          val numTasks = stage.getOrElse("numTasks", 0).toString.toDouble
-          val duration = stage.getOrElse("duration", 0).toString.toDouble
+stagesDF.collect().foreach { row =>
+  val stage = row.getAs[org.apache.spark.sql.Row]("stage")
+  val stageId = stage.getAs[Long]("stageId")
+  val stageName = stage.getAs[String]("name").replaceAll("[^a-zA-Z0-9_]", "_")
+  val numTasks = stage.getAs[Long]("numTasks")
+  val duration = stage.getAs[Double]("duration")  // in ms
 
-          // Task count metric
-          val taskGauge = Gauge.build()
-            .name(s"spark_stage_${stageId}_task_count")
-            .help(s"Number of tasks in stage ${stageName}")
-            .register(registry)
-          taskGauge.set(numTasks)
+  // Task count metric
+  val taskGauge = Gauge.build()
+    .name(s"spark_stage_${stageId}_task_count")
+    .help(s"Number of tasks in stage ${stageName}")
+    .register(registry)
+  taskGauge.set(numTasks.toDouble)
 
-          // Total duration metric
-          val durationGauge = Gauge.build()
-            .name(s"spark_stage_${stageId}_total_duration_ms")
-            .help(s"Total task duration in ms for stage ${stageName}")
-            .register(registry)
-          durationGauge.set(duration)
-        }
-      case _ =>
-        println("No stages found in JSON")
-    }
-  case _ =>
-    println("Failed to parse JSON")
+  // Total duration metric
+  val durationGauge = Gauge.build()
+    .name(s"spark_stage_${stageId}_total_duration_ms")
+    .help(s"Total task duration in ms for stage ${stageName}")
+    .register(registry)
+  durationGauge.set(duration)
 }
 
 // Push to Pushgateway
 val pg = new PushGateway(pushGatewayURL)
 pg.pushAdd(registry, jobName)
-
 println(s"Metrics pushed to Pushgateway at $pushGatewayURL/job/$jobName")
