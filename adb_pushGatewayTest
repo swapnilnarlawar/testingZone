@@ -1,5 +1,33 @@
-aggMap.foreach { case (metricName, metricValue) =>
-  val safeName = metricName.replaceAll("[^a-zA-Z0-9_]", "_") // make it Prometheus-safe
+import ch.cern.sparkmeasure.StageMetrics
+import io.prometheus.client.{CollectorRegistry, Gauge}
+import io.prometheus.client.exporter.common.TextFormat
+import java.net.{URL, HttpURLConnection}
+import java.io.OutputStream
+
+// ----------------------
+// 1️⃣ Initialize SparkMeasure
+// ----------------------
+val stageMetrics = StageMetrics(spark)
+
+stageMetrics.runAndMeasure {
+  spark.sql("SELECT COUNT(*) FROM range(1000) CROSS JOIN range(1000) CROSS JOIN range(1000)").show()
+}
+
+stageMetrics.printMemoryReport()
+
+// ----------------------
+// 2️⃣ Aggregate metrics
+// ----------------------
+val metricsMap = stageMetrics.aggregateStageMetrics()
+val registry = new CollectorRegistry()
+val jobName = "databricks_spark_metrics"
+val pushGatewayHost = "pushgateway.myaks.net:443"  // HTTPS port
+
+// ----------------------
+// 3️⃣ Register metrics in Prometheus registry
+// ----------------------
+metricsMap.foreach { case (metricName, metricValue) =>
+  val safeName = metricName.replaceAll("[^a-zA-Z0-9_]", "_")
   Gauge.build()
     .name(s"spark_${safeName}")
     .help(s"Spark metric: $metricName")
@@ -7,7 +35,32 @@ aggMap.foreach { case (metricName, metricValue) =>
     .set(metricValue.toDouble)
 }
 
-// Push metrics to Pushgateway
-new PushGateway(pushGatewayURL).pushAdd(registry, jobName)
+// ----------------------
+// 4️⃣ HTTPS Push function
+// ----------------------
+def pushMetricsHTTPS(registry: CollectorRegistry, jobName: String, pushGatewayHost: String): Unit = {
+  val url = new URL(s"https://$pushGatewayHost/metrics/job/$jobName")
+  val conn = url.openConnection().asInstanceOf[HttpURLConnection]
+  conn.setDoOutput(true)
+  conn.setRequestMethod("POST")
+  conn.setRequestProperty("Content-Type", TextFormat.CONTENT_TYPE_004)
 
-println(s"✅ ${aggMap.size} Spark metrics pushed to $pushGatewayURL/job/$jobName")
+  val writer: OutputStream = conn.getOutputStream
+  try {
+    TextFormat.write004(writer, registry.metricFamilySamples())
+  } finally {
+    writer.close()
+  }
+
+  val responseCode = conn.getResponseCode
+  println(s"HTTPS push response code: $responseCode")
+  if (responseCode >= 400) {
+    throw new RuntimeException(s"PushGateway push failed: $responseCode")
+  }
+}
+
+// ----------------------
+// 5️⃣ Push metrics to HTTPS PushGateway
+// ----------------------
+pushMetricsHTTPS(registry, jobName, pushGatewayHost)
+println(s"✅ Metrics pushed to https://$pushGatewayHost/metrics/job/$jobName")
