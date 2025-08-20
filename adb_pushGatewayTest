@@ -1,61 +1,13 @@
-import ch.cern.sparkmeasure.StageMetrics
-
-// Initialize StageMetrics
-val stageMetrics = StageMetrics(spark)
-
-// Quick run + measure in a single call
-stageMetrics.runAndMeasure {
-  spark.sql("SELECT COUNT(*) FROM range(1000) CROSS JOIN range(1000) CROSS JOIN range(1000)").show()
+aggMap.foreach { case (metricName, metricValue) =>
+  val safeName = metricName.replaceAll("[^a-zA-Z0-9_]", "_") // make it Prometheus-safe
+  Gauge.build()
+    .name(s"spark_${safeName}")
+    .help(s"Spark metric: $metricName")
+    .register(registry)
+    .set(metricValue.toDouble)
 }
 
-// Print executor memory usage
-stageMetrics.printMemoryReport()
-
-// Manual way (begin/end)
-stageMetrics.begin()
-
-spark.sql("SELECT COUNT(*) FROM range(1000) CROSS JOIN range(1000) CROSS JOIN range(1000)").show()
-
-stageMetrics.end()
-
-// Print a summary report
-stageMetrics.printReport()
-
-import io.prometheus.client.{CollectorRegistry, Gauge}
-import io.prometheus.client.exporter.PushGateway
-
-// Collect metrics summary as a Spark DataFrame
-val metricsDF = stageMetrics.aggregateStageMetrics("executorRunTime", "executorCpuTime", "inputBytes", "shuffleReadBytes", "shuffleWriteBytes")
-metricsDF.show(false)
-
-// Convert to local collection for Prometheus push
-val metrics = metricsDF.collect()
-
-// Create Prometheus registry
-val registry = new CollectorRegistry()
-val jobName = "databricks_spark_stage_metrics"
-val pushGatewayURL = "http://<your-pushgateway-ingress-host>"   // <-- ingress in AKS
-
-// Register Gauges dynamically
-metrics.foreach { row =>
-  val stageId = row.getAs[Int]("stageId")
-  val execTime = row.getAs[Double]("executorRunTime")
-  val cpuTime  = row.getAs[Double]("executorCpuTime")
-
-  Gauge.build()
-    .name(s"spark_stage_${stageId}_executor_time_ms")
-    .help(s"Executor run time for stage $stageId")
-    .register(registry)
-    .set(execTime)
-
-  Gauge.build()
-    .name(s"spark_stage_${stageId}_cpu_time_ms")
-    .help(s"Executor CPU time for stage $stageId")
-    .register(registry)
-    .set(cpuTime)
-}
-
-// Push to Pushgateway
+// Push metrics to Pushgateway
 new PushGateway(pushGatewayURL).pushAdd(registry, jobName)
 
-println(s"✅ Metrics pushed to $pushGatewayURL/job/$jobName")
+println(s"✅ ${aggMap.size} Spark metrics pushed to $pushGatewayURL/job/$jobName")
