@@ -2,18 +2,18 @@ import ch.cern.sparkmeasure.StageMetrics
 import io.prometheus.client.{CollectorRegistry, Gauge}
 import io.prometheus.client.exporter.common.TextFormat
 import java.net.{URL, HttpURLConnection}
-import java.io.OutputStream
+import java.io.{OutputStreamWriter, BufferedWriter}
 
 // ----------------------
 // 1️⃣ Initialize SparkMeasure
 // ----------------------
 val stageMetrics = StageMetrics(spark)
 
-stageMetrics.runAndMeasure {
-  spark.sql("SELECT COUNT(*) FROM range(1000) CROSS JOIN range(1000) CROSS JOIN range(1000)").show()
-}
+stageMetrics.begin()
+spark.sql("SELECT COUNT(*) FROM range(1000) CROSS JOIN range(1000) CROSS JOIN range(1000)").show()
+stageMetrics.end()
 
-stageMetrics.printMemoryReport()
+stageMetrics.printReport()
 
 // ----------------------
 // 2️⃣ Aggregate metrics
@@ -21,11 +21,19 @@ stageMetrics.printMemoryReport()
 val metricsMap = stageMetrics.aggregateStageMetrics()
 val registry = new CollectorRegistry()
 val jobName = "databricks_spark_metrics"
-val pushGatewayHost = "pushgateway.myaks.net:443"  // HTTPS port
+val pushGatewayHost = "pushgateway.myaks.net"  // HTTPS port
 
 // ----------------------
 // 3️⃣ Register metrics in Prometheus registry
 // ----------------------
+// Single Metrics
+// Gauge.build()
+//  .name("test_metric")
+//  .help("Test metric for PushGateway HTTPS connectivity")
+//  .register(registry)
+//  .set(1.0)
+
+// Multiple Metrics
 metricsMap.foreach { case (metricName, metricValue) =>
   val safeName = metricName.replaceAll("[^a-zA-Z0-9_]", "_")
   Gauge.build()
