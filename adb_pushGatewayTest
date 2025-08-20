@@ -1,77 +1,68 @@
-import ch.cern.sparkmeasure.StageMetrics
+import ch.cern.sparkmeasure.FlightRecorderStageMetrics
 import io.prometheus.client.{CollectorRegistry, Gauge}
 import io.prometheus.client.exporter.PushGateway
 import org.apache.spark.sql.functions._
 
 // ----------------------
-// Step 1: Initialize StageMetrics
+// Step 1: Initialize Flight Recorder
 // ----------------------
-val sm = new StageMetrics(spark)
-sm.begin()
+val fr = new FlightRecorderStageMetrics(spark)
+fr.start()
 
 // ----------------------
-// Step 2: Example Spark Job
+// Step 2: Run some Spark workload
 // ----------------------
-val df = spark.range(1000000).withColumn("square", col("id") * col("id"))
+val df = spark.range(1e6.toLong).withColumn("square", col("id") * col("id"))
 df.agg(avg("square")).show()
 
-sm.end()
+fr.stop()
 
 // ----------------------
-// Step 3: Capture Flight Recorder JSON
+// Step 3: Get Flight Recorder JSON
 // ----------------------
-import java.io.{ByteArrayOutputStream, PrintStream}
-val baos = new ByteArrayOutputStream()
-val ps = new PrintStream(baos)
-val oldOut = Console.out
-Console.setOut(ps)
-sm.report()  // prints JSON
-Console.setOut(oldOut)
+val jsonString: String = fr.getAllEventsJSON()
 
-val jsonString = baos.toString
-// Save to DBFS
+// Save to DBFS for debugging (optional)
 dbutils.fs.put("dbfs:/tmp/flight_recorder.json", jsonString, true)
 
+println("✅ Captured Flight Recorder JSON")
+
 // ----------------------
-// Step 4: Parse JSON with Spark
+// Step 4: Parse JSON into DataFrame
 // ----------------------
 val jsonDF = spark.read.option("multiline", "true").json(Seq(jsonString).toDS)
-jsonDF.show(false)  // check the structure
+val stagesDF = jsonDF.selectExpr("explode(events) as event").select("event.*")
 
-// Extract stages
-val stagesDF = jsonDF.select(explode($"stages").alias("stage"))
+println("=== Parsed Events ===")
 stagesDF.show(false)
 
 // ----------------------
-// Step 5: Push metrics to Pushgateway
+// Step 5: Push a couple metrics to Pushgateway
 // ----------------------
 val registry = new CollectorRegistry()
-val pushGatewayURL = "http://pushgateway.example.com/metrics"
+val pushGatewayURL = "http://pushgateway.example.com"  // ingress in AKS
 val jobName = "spark_databricks_flight_recorder"
 
-stagesDF.collect().foreach { row =>
-  val stage = row.getAs[org.apache.spark.sql.Row]("stage")
-  val stageId = stage.getAs[Long]("stageId")
-  val stageName = stage.getAs[String]("name").replaceAll("[^a-zA-Z0-9_]", "_")
-  val numTasks = stage.getAs[Long]("numTasks")
-  val duration = stage.getAs[Double]("duration")  // in ms
+// Example: capture duration + task count
+stagesDF.select("stageId","numTasks","executorRunTime").collect().foreach { row =>
+  val stageId = row.getAs[Long]("stageId")
+  val numTasks = row.getAs[Long]("numTasks")
+  val duration = row.getAs[Double]("executorRunTime")
 
-  // Task count metric
   val taskGauge = Gauge.build()
     .name(s"spark_stage_${stageId}_task_count")
-    .help(s"Number of tasks in stage ${stageName}")
+    .help(s"Number of tasks in stage $stageId")
     .register(registry)
   taskGauge.set(numTasks.toDouble)
 
-  // Total duration metric
   val durationGauge = Gauge.build()
-    .name(s"spark_stage_${stageId}_total_duration_ms")
-    .help(s"Total task duration in ms for stage ${stageName}")
+    .name(s"spark_stage_${stageId}_executor_runtime_ms")
+    .help(s"Executor runtime (ms) in stage $stageId")
     .register(registry)
   durationGauge.set(duration)
 }
 
-// Push to Pushgateway
 val pg = new PushGateway(pushGatewayURL)
 pg.pushAdd(registry, jobName)
-println(s"Metrics pushed to Pushgateway at $pushGatewayURL/job/$jobName")
+
+println(s"✅ Metrics pushed to Pushgateway at $pushGatewayURL/job/$jobName")
