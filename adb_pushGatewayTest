@@ -6,7 +6,7 @@ import org.apache.spark.sql.functions._
 // ----------------------
 // Step 1: Initialize Flight Recorder
 // ----------------------
-val fr = new FlightRecorderStageMetrics(spark)
+val fr = new FlightRecorderStageMetrics(spark.sparkContext.getConf)
 fr.start()
 
 // ----------------------
@@ -18,35 +18,38 @@ df.agg(avg("square")).show()
 fr.stop()
 
 // ----------------------
-// Step 3: Get Flight Recorder JSON
+// Step 3: Collect Flight Recorder Events
 // ----------------------
-val jsonString: String = fr.getAllEventsJSON()
+val events: Seq[Map[String, Any]] = fr.getAllEvents()
 
-// Save to DBFS for debugging (optional)
-dbutils.fs.put("dbfs:/tmp/flight_recorder.json", jsonString, true)
-
-println("✅ Captured Flight Recorder JSON")
+println(s"✅ Captured ${events.size} events")
 
 // ----------------------
-// Step 4: Parse JSON into DataFrame
+// Step 4: Convert to DataFrame
 // ----------------------
-val jsonDF = spark.read.option("multiline", "true").json(Seq(jsonString).toDS)
-val stagesDF = jsonDF.selectExpr("explode(events) as event").select("event.*")
+import spark.implicits._
+val eventsDF = events.map(_.map{ case (k,v) => (k, v.toString)}).map(_.toSeq).toDF("kv")
+eventsDF.show(false)
 
-println("=== Parsed Events ===")
-stagesDF.show(false)
+// Or explode into proper columns:
+val flatDF = events.map(e => (
+    e.getOrElse("stageId", -1).toString.toInt,
+    e.getOrElse("numTasks", 0).toString.toInt,
+    e.getOrElse("executorRunTime", 0).toString.toDouble
+)).toDF("stageId","numTasks","executorRunTime")
+
+flatDF.show(false)
 
 // ----------------------
-// Step 5: Push a couple metrics to Pushgateway
+// Step 5: Push metrics to Pushgateway
 // ----------------------
 val registry = new CollectorRegistry()
-val pushGatewayURL = "http://pushgateway.example.com"  // ingress in AKS
+val pushGatewayURL = "http://pushgateway.example.com"
 val jobName = "spark_databricks_flight_recorder"
 
-// Example: capture duration + task count
-stagesDF.select("stageId","numTasks","executorRunTime").collect().foreach { row =>
-  val stageId = row.getAs[Long]("stageId")
-  val numTasks = row.getAs[Long]("numTasks")
+flatDF.collect().foreach { row =>
+  val stageId = row.getAs[Int]("stageId")
+  val numTasks = row.getAs[Int]("numTasks")
   val duration = row.getAs[Double]("executorRunTime")
 
   val taskGauge = Gauge.build()
