@@ -1,0 +1,85 @@
+# PushGateway Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pushgateway-deployment
+  namespace: observability
+  labels:
+    app: pushgateway
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pushgateway
+  template:
+    metadata:
+      labels:
+        app: pushgateway
+    spec:
+      containers:
+      - name: pushgateway
+        image: prom/pushgateway:latest
+        imagePullPolicy: Always
+        ports:
+          - containerPort: 9091
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+
+# PushGateway Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: pushgateway-service
+  namespace: observability
+spec:
+  selector:
+    app: pushgateway
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 9091
+  type: ClusterIP
+
+# PushGateway Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pushgateway-ingress
+  namespace: observability
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    kubernetes.io/ingress.allow-http: "false" 
+    kubernetes.io/ssl-redirect: "true" 
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true" 
+    nginx.ingress.kubernetes.io/ingress.allow-http: "false" 
+    nginx.ingress.kubernetes.io/service-upstream: "true" 
+    nginx.ingress.kubernetes.io/ssl-passthrough: "false" 
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-body-size: 8m
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "360"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "360"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "360"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: pushgateway.myaks.net
+    http:
+      paths:
+      - path: /
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: pushgateway-service
+            port:
+              number: 80
+  tls:
+    - hosts:
+      - pushgateway.myaks.net
+      secretName: ingress-tls
