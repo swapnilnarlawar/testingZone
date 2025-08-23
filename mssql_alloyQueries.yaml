@@ -1,0 +1,174 @@
+# Custom MSSQL metrics for Azure SQL Database
+# Compatible with Grafana Alloy collector=mssql_standard
+
+metrics:
+
+  ######################################################
+  # 1. Resource Utilization (sys.dm_db_resource_stats)
+  ######################################################
+  - name: azure_sql_cpu_percent
+    help: "Average CPU percent over last interval"
+    type: gauge
+    key_labels: [database_name]
+    values: [avg_cpu_percent, max_cpu_percent, min_cpu_percent]
+    query: |
+      SELECT
+        DB_NAME() AS database_name,
+        avg_cpu_percent,
+        max_cpu_percent,
+        min_cpu_percent
+      FROM sys.dm_db_resource_stats;
+
+  - name: azure_sql_io_percent
+    help: "Data IO and log write percent"
+    type: gauge
+    key_labels: [database_name]
+    values: [avg_data_io_percent, avg_log_write_percent]
+    query: |
+      SELECT
+        DB_NAME() AS database_name,
+        avg_data_io_percent,
+        avg_log_write_percent
+      FROM sys.dm_db_resource_stats;
+
+  - name: azure_sql_memory_usage_percent
+    help: "Memory usage percent"
+    type: gauge
+    key_labels: [database_name]
+    values: [avg_memory_usage_percent]
+    query: |
+      SELECT
+        DB_NAME() AS database_name,
+        avg_memory_usage_percent
+      FROM sys.dm_db_resource_stats;
+
+  - name: azure_sql_workers_sessions
+    help: "Workers and sessions percent"
+    type: gauge
+    key_labels: [database_name]
+    values: [avg_workers_percent, avg_sessions_percent, avg_xtp_storage_percent]
+    query: |
+      SELECT
+        DB_NAME() AS database_name,
+        avg_workers_percent,
+        avg_sessions_percent,
+        avg_xtp_storage_percent
+      FROM sys.dm_db_resource_stats;
+
+  ######################################################
+  # 2. Connections & Workload
+  ######################################################
+  - name: azure_sql_active_connections
+    help: "Current active connections"
+    type: gauge
+    values: [connections]
+    query: |
+      SELECT COUNT(*) AS connections FROM sys.dm_exec_connections;
+
+  - name: azure_sql_active_requests
+    help: "Current active requests"
+    type: gauge
+    values: [requests]
+    query: |
+      SELECT COUNT(*) AS requests FROM sys.dm_exec_requests;
+
+  - name: azure_sql_blocked_sessions
+    help: "Blocked sessions"
+    type: gauge
+    values: [blocked]
+    query: |
+      SELECT COUNT(*) AS blocked
+      FROM sys.dm_exec_requests
+      WHERE blocking_session_id <> 0;
+
+  ######################################################
+  # 3. Wait Statistics
+  ######################################################
+  - name: azure_sql_waits
+    help: "Wait statistics by type"
+    type: counter
+    key_labels: [wait_type]
+    values: [wait_time_ms, signal_wait_time_ms, waiting_tasks_count]
+    query: |
+      SELECT
+        wait_type,
+        wait_time_ms,
+        signal_wait_time_ms,
+        waiting_tasks_count
+      FROM sys.dm_db_wait_stats;
+
+  ######################################################
+  # 4. Query Performance (Query Store)
+  ######################################################
+  - name: azure_sql_query_stats
+    help: "Query Store runtime stats (CPU, duration, reads, writes)"
+    type: gauge
+    key_labels: [query_id, plan_id, database_name]
+    values: [avg_duration, avg_cpu_time, avg_logical_io_reads, avg_logical_io_writes, execution_count]
+    query: |
+      SELECT
+        qs.query_id,
+        rs.plan_id,
+        DB_NAME() AS database_name,
+        rs.avg_duration,
+        rs.avg_cpu_time,
+        rs.avg_logical_io_reads,
+        rs.avg_logical_io_writes,
+        rs.execution_count
+      FROM sys.query_store_runtime_stats rs
+      JOIN sys.query_store_plan ps ON rs.plan_id = ps.plan_id
+      JOIN sys.query_store_query qs ON ps.query_id = qs.query_id;
+
+  ######################################################
+  # 5. Storage & IO
+  ######################################################
+  - name: azure_sql_file_size_kb
+    help: "File size in KB"
+    type: gauge
+    key_labels: [file_id, file_name]
+    values: [size_kb, used_kb]
+    query: |
+      SELECT
+        file_id,
+        name AS file_name,
+        size*8 AS size_kb,
+        FILEPROPERTY(name, 'SpaceUsed')*8 AS used_kb
+      FROM sys.database_files;
+
+  - name: azure_sql_file_io
+    help: "IO stats per file"
+    type: counter
+    key_labels: [database_id, file_id]
+    values: [num_of_reads, num_of_writes, num_of_bytes_read, num_of_bytes_written, io_stall_read_ms, io_stall_write_ms]
+    query: |
+      SELECT
+        vfs.database_id,
+        vfs.file_id,
+        vfs.num_of_reads,
+        vfs.num_of_writes,
+        vfs.num_of_bytes_read,
+        vfs.num_of_bytes_written,
+        vfs.io_stall_read_ms,
+        vfs.io_stall_write_ms
+      FROM sys.dm_io_virtual_file_stats(DB_ID(), NULL) vfs;
+
+  ######################################################
+  # 6. Reliability & Errors
+  ######################################################
+  - name: azure_sql_deadlocks
+    help: "Number of deadlocks per second"
+    type: counter
+    values: [cntr_value]
+    query: |
+      SELECT cntr_value
+      FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Number of Deadlocks/sec';
+
+  - name: azure_sql_errors
+    help: "Errors/sec"
+    type: counter
+    values: [cntr_value]
+    query: |
+      SELECT cntr_value
+      FROM sys.dm_os_performance_counters
+      WHERE counter_name = 'Errors/sec';
