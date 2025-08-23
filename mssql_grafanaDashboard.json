@@ -1,0 +1,269 @@
+{
+  "title": "Azure SQL Database Complete Overview",
+  "uid": "azure-sql-db-complete",
+  "timezone": "browser",
+  "schemaVersion": 30,
+  "version": 1,
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "database_name",
+        "label": "Database",
+        "type": "query",
+        "datasource": "Prometheus",
+        "refresh": 2,
+        "query": "label_values(mssql_cpu_percent, database_name)",
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "swci",
+        "label": "SWCI",
+        "type": "query",
+        "datasource": "Prometheus",
+        "refresh": 2,
+        "query": "label_values(mssql_cpu_percent, swci)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Resource Utilization",
+      "collapsed": false
+    },
+    {
+      "type": "gauge",
+      "title": "CPU % (avg/max/min)",
+      "targets": [
+        { "expr": "avg(mssql_cpu_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" },
+        { "expr": "max(mssql_cpu_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" },
+        { "expr": "min(mssql_cpu_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 0, "y": 1, "w": 6, "h": 6 }
+    },
+    {
+      "type": "gauge",
+      "title": "Data IO %",
+      "targets": [
+        { "expr": "avg(mssql_data_io_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 6, "y": 1, "w": 6, "h": 6 }
+    },
+    {
+      "type": "gauge",
+      "title": "Log Write %",
+      "targets": [
+        { "expr": "avg(mssql_log_write_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 12, "y": 1, "w": 6, "h": 6 }
+    },
+    {
+      "type": "gauge",
+      "title": "Memory Usage %",
+      "targets": [
+        { "expr": "avg(mssql_memory_usage_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 18, "y": 1, "w": 6, "h": 6 }
+    },
+    {
+      "type": "gauge",
+      "title": "Workers %",
+      "targets": [
+        { "expr": "avg(mssql_workers_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 0, "y": 7, "w": 6, "h": 6 }
+    },
+    {
+      "type": "gauge",
+      "title": "Sessions %",
+      "targets": [
+        { "expr": "avg(mssql_sessions_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 6, "y": 7, "w": 6, "h": 6 }
+    },
+    {
+      "type": "gauge",
+      "title": "XTP Storage %",
+      "targets": [
+        { "expr": "avg(mssql_xtp_storage_percent{database_name=~\"$database_name\", swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 12, "y": 7, "w": 6, "h": 6 }
+    },
+    {
+      "type": "row",
+      "title": "Connections & Workload",
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Active Connections",
+      "targets": [
+        { "expr": "mssql_active_connections{database_name=~\"$database_name\", swci=~\"$swci\"}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "swci" },
+            "properties": [{ "id": "color", "value": { "mode": "palette-classic" } }]
+          }
+        ]
+      },
+      "gridPos": { "x": 0, "y": 13, "w": 12, "h": 6 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Active Requests",
+      "targets": [
+        { "expr": "mssql_active_requests{database_name=~\"$database_name\", swci=~\"$swci\"}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "swci" },
+            "properties": [{ "id": "color", "value": { "mode": "palette-classic" } }]
+          }
+        ]
+      },
+      "gridPos": { "x": 12, "y": 13, "w": 12, "h": 6 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Blocked Sessions",
+      "targets": [
+        { "expr": "mssql_blocked_sessions{database_name=~\"$database_name\", swci=~\"$swci\"}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "swci" },
+            "properties": [{ "id": "color", "value": { "mode": "palette-classic" } }]
+          }
+        ]
+      },
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 6 }
+    },
+    {
+      "type": "row",
+      "title": "Wait Statistics",
+      "collapsed": false
+    },
+    {
+      "type": "bargauge",
+      "title": "Top Waits (by time)",
+      "targets": [
+        { "expr": "topk(5, sum by (wait_type) (mssql_wait_time_ms{database_name=~\"$database_name\", swci=~\"$swci\"}))" }
+      ],
+      "gridPos": { "x": 0, "y": 25, "w": 24, "h": 6 }
+    },
+    {
+      "type": "row",
+      "title": "Query Store Insights",
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Top Queries by CPU",
+      "targets": [
+        { "expr": "topk(10, sum by(query_hash) (mssql_query_stats_cpu_time_ms{database_name=~\"$database_name\", swci=~\"$swci\"}))" }
+      ],
+      "gridPos": { "x": 0, "y": 31, "w": 24, "h": 6 }
+    },
+    {
+      "type": "row",
+      "title": "Storage & IO",
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "DB File Sizes (MB)",
+      "targets": [
+        { "expr": "mssql_db_file_size_kb{database_name=~\"$database_name\", swci=~\"$swci\"} / 1024" }
+      ],
+      "gridPos": { "x": 0, "y": 37, "w": 12, "h": 6 }
+    },
+    {
+      "type": "timeseries",
+      "title": "File IO Stalls (ms)",
+      "targets": [
+        { "expr": "mssql_file_io_stall_ms{database_name=~\"$database_name\", swci=~\"$swci\"}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "swci" },
+            "properties": [{ "id": "color", "value": { "mode": "palette-classic" } }]
+          }
+        ]
+      },
+      "gridPos": { "x": 12, "y": 37, "w": 12, "h": 6 }
+    },
+    {
+      "type": "row",
+      "title": "Reliability & Errors",
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Deadlocks/sec",
+      "targets": [
+        { "expr": "mssql_deadlocks{database_name=~\"$database_name\", swci=~\"$swci\"}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "swci" },
+            "properties": [{ "id": "color", "value": { "mode": "palette-classic" } }]
+          }
+        ]
+      },
+      "gridPos": { "x": 0, "y": 43, "w": 12, "h": 6 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors/sec",
+      "targets": [
+        { "expr": "mssql_errors{database_name=~\"$database_name\", swci=~\"$swci\"}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "swci" },
+            "properties": [{ "id": "color", "value": { "mode": "palette-classic" } }]
+          }
+        ]
+      },
+      "gridPos": { "x": 12, "y": 43, "w": 12, "h": 6 }
+    },
+    {
+      "type": "row",
+      "title": "Elastic Pool Overview (Optional)",
+      "collapsed": false
+    },
+    {
+      "type": "gauge",
+      "title": "Elastic Pool CPU (%)",
+      "targets": [
+        { "expr": "avg(mssql_elastic_pool_cpu_percent{swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 0, "y": 49, "w": 6, "h": 6 }
+    },
+    {
+      "type": "gauge",
+      "title": "Elastic Pool Data IO (%)",
+      "targets": [
+        { "expr": "avg(mssql_elastic_pool_data_io_percent{swci=~\"$swci\"})" }
+      ],
+      "gridPos": { "x": 6, "y": 49, "w": 6, "h": 6 }
+    }
+  ]
+}
