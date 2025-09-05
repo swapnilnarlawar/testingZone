@@ -1,0 +1,54 @@
+// Imports
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.metrics.{Meter, ObservableDoubleMeasurement}
+import io.opentelemetry.api.common.Attributes
+
+// Create Spark session
+val spark = SparkSession.builder()
+  .appName("test_otel")
+  .getOrCreate()
+
+import spark.implicits._
+
+// Sample Spark workload
+val df = spark.range(1, 1000).toDF("numbers")
+val totalCount = df.agg(sum("numbers")).collect()(0).getLong(0)
+println(s"Spark sum: $totalCount")
+
+// -----------------
+// Gather Dynamic Runtime Context
+// -----------------
+val jobId        = sys.env.getOrElse("DATABRICKS_JOB_ID", "unknown_job")
+val runId        = sys.env.getOrElse("DATABRICKS_RUN_ID", "unknown_run")
+val clusterId    = sys.env.getOrElse("DATABRICKS_CLUSTER_ID", "unknown_cluster")
+val dataSource   = "range_1_to_1000"  // could also be a job parameter
+val cmdbReference = sys.env.getOrElse("CMDB_REFERENCE", "default_cmdb_ref")
+
+// -----------------
+// Register Gauge Metric with Dynamic Labels
+// -----------------
+val meter: Meter = GlobalOpenTelemetry.getMeter("databricks-meter")
+
+meter.gaugeBuilder("records_processed_gauge")
+  .ofDoubles()
+  .setDescription("Current total of records processed in Spark job")
+  .buildWithCallback { observable: ObservableDoubleMeasurement =>
+    val attrs = Attributes.builder()
+      .put("spark.app.name", spark.sparkContext.appName)
+      .put("spark.cluster.mode", spark.conf.get("spark.master"))
+      .put("databricks.job.id", jobId)
+      .put("databricks.run.id", runId)
+      .put("databricks.cluster.id", clusterId)
+      .put("data.source", dataSource)
+      .put("cmdbReference", cmdbReference)   // ✅ new label
+      .build()
+
+    observable.record(totalCount.toDouble, attrs)
+  }
+
+println(s"✅ Gauge 'records_processed_gauge' registered with dynamic labels including cmdbReference=$cmdbReference")
+
+// Keep JVM alive briefly so metrics flush
+Thread.sleep(15000)
