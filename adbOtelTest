@@ -1,54 +1,101 @@
+// -----------------------------
 // Imports
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions._
-import io.opentelemetry.api.GlobalOpenTelemetry
-import io.opentelemetry.api.metrics.{Meter, ObservableDoubleMeasurement}
+// -----------------------------
 import io.opentelemetry.api.common.Attributes
+import io.opentelemetry.api.metrics.{Meter, ObservableDoubleMeasurement}
+import io.opentelemetry.sdk.OpenTelemetrySdk
+import io.opentelemetry.sdk.metrics.SdkMeterProvider
+import io.opentelemetry.sdk.metrics.`export`.PeriodicMetricReader
+import io.opentelemetry.exporter.otlp.metrics.OtlpHttpMetricExporter
+import io.opentelemetry.sdk.resources.Resource
+import io.opentelemetry.semconv.ResourceAttributes
 
-// Create Spark session
-val spark = SparkSession.builder()
-  .appName("test_otel")
-  .getOrCreate()
+import java.util.concurrent.TimeUnit
 
-import spark.implicits._
+// -----------------------------
+// Exporter config (HTTP/Protobuf)
+// -----------------------------
+val exporter = OtlpHttpMetricExporter.builder()
+  .setEndpoint("https://otelcol.test.net/v1/metrics") // full metrics endpoint
+  .addHeader("X-Scope-OrgID", "234e8236-3242-1231-342")
+  .build()
 
-// Sample Spark workload
-val df = spark.range(1, 1000).toDF("numbers")
-val totalCount = df.agg(sum("numbers")).collect()(0).getLong(0)
-println(s"Spark sum: $totalCount")
-
-// -----------------
-// Gather Dynamic Runtime Context
-// -----------------
-val jobId        = sys.env.getOrElse("DATABRICKS_JOB_ID", "unknown_job")
-val runId        = sys.env.getOrElse("DATABRICKS_RUN_ID", "unknown_run")
-val clusterId    = sys.env.getOrElse("DATABRICKS_CLUSTER_ID", "unknown_cluster")
-val dataSource   = "range_1_to_1000"  // could also be a job parameter
-val cmdbReference = sys.env.getOrElse("CMDB_REFERENCE", "default_cmdb_ref")
-
-// -----------------
-// Register Gauge Metric with Dynamic Labels
-// -----------------
-val meter: Meter = GlobalOpenTelemetry.getMeter("databricks-meter")
-
-meter.gaugeBuilder("records_processed_gauge")
-  .ofDoubles()
-  .setDescription("Current total of records processed in Spark job")
-  .buildWithCallback { observable: ObservableDoubleMeasurement =>
-    val attrs = Attributes.builder()
-      .put("spark.app.name", spark.sparkContext.appName)
-      .put("spark.cluster.mode", spark.conf.get("spark.master"))
-      .put("databricks.job.id", jobId)
-      .put("databricks.run.id", runId)
-      .put("databricks.cluster.id", clusterId)
-      .put("data.source", dataSource)
-      .put("cmdbReference", cmdbReference)   // ✅ new label
+// -----------------------------
+// Resource attributes (apply to all metrics)
+// -----------------------------
+val resource = Resource.getDefault.merge(
+  Resource.create(
+    Attributes.builder()
+      .put(ResourceAttributes.SERVICE_NAME, "m922633_oteltest")
+      .put("cmdbReference", "AT12345")
       .build()
+  )
+)
 
-    observable.record(totalCount.toDouble, attrs)
+// -----------------------------
+// MeterProvider with periodic export
+// -----------------------------
+val metricReader = PeriodicMetricReader.builder(exporter)
+  .setInterval(5000, TimeUnit.MILLISECONDS)
+  .build()
+
+val meterProvider = SdkMeterProvider.builder()
+  .setResource(resource)
+  .registerMetricReader(metricReader)
+  .build()
+
+val openTelemetry = OpenTelemetrySdk.builder()
+  .setMeterProvider(meterProvider)
+  .buildAndRegisterGlobal()
+
+val meter: Meter = openTelemetry.getMeter("manualTest")
+
+// -----------------------------
+// Metric 1: example_gauge_m922633
+// -----------------------------
+meter.gaugeBuilder("example_gauge_m922633")
+  .setDescription("first gauge metric")
+  .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+    val attrs = Attributes.builder()
+      .put("environment", "dev")
+      .build()
+    measurement.record(42.5, attrs)
   }
 
-println(s"✅ Gauge 'records_processed_gauge' registered with dynamic labels including cmdbReference=$cmdbReference")
+// -----------------------------
+// Metric 2: records_processed_total
+// -----------------------------
+meter.gaugeBuilder("records_processed_total")
+  .setDescription("second gauge metric")
+  .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+    val attrs = Attributes.builder()
+      .put("environment", "qa")
+      .build()
+    measurement.record(12345.0, attrs)
+  }
 
-// Keep JVM alive briefly so metrics flush
-Thread.sleep(15000)
+// -----------------------------
+// Metric 3: multi_datapoint_metric
+// -----------------------------
+meter.gaugeBuilder("multi_datapoint_metric")
+  .setDescription("third gauge metric with multiple datapoints")
+  .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+    // datapoint 1: environment=dev
+    val attrsDev = Attributes.builder()
+      .put("environment", "dev")
+      .build()
+    measurement.record(77.7, attrsDev)
+
+    // datapoint 2: environment=qa
+    val attrsQa = Attributes.builder()
+      .put("environment", "qa")
+      .build()
+    measurement.record(88.8, attrsQa)
+  }
+
+println("✅ Registered 3 metrics (two single-datapoint + one multi-datapoint).")
+
+// -----------------------------
+// Keep JVM alive to flush metrics
+// -----------------------------
+Thread.sleep(20000)
