@@ -9,3 +9,11 @@ libraryDependencies ++= Seq(
   "io.opentelemetry" % "opentelemetry-semconv" % "1.34.0",
   "io.opentelemetry" % "opentelemetry-sdk-extension-resources" % "1.19.0"
 )
+
+
+
+object Main {
+  def main(args: Array[String]): Unit = {
+    println("Hello, OpenTelemetry Scala!")
+  }
+}
