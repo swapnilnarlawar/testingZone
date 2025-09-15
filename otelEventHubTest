@@ -197,54 +197,84 @@ libraryDependencies ++= Seq(
 
 
 
+import com.microsoft.aad.msal4j._
 import com.azure.identity.ClientSecretCredentialBuilder
 import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
 import org.json4s.native.Serialization
 import org.json4s.native.Serialization.write
 import org.json4s.NoTypeHints
+import java.util.Collections
+import scala.jdk.CollectionConverters._
 
-object EventHubLocalTest {
+object EventHubMetricTest {
 
-  // Implicit formats for JSON serialization
   implicit val formats = Serialization.formats(NoTypeHints)
 
-  // Define Metric case class
   case class Metric(name: String, value: Double, timestamp: Long)
 
   def main(args: Array[String]): Unit = {
 
-    // Load credentials from environment variables
+    // -------------------------------
+    // 1️⃣ Load credentials from env
+    // -------------------------------
     val tenantId     = sys.env("AZ_TENANT_ID")
     val clientId     = sys.env("AZ_CLIENT_ID")
     val clientSecret = sys.env("AZ_CLIENT_SECRET")
+    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE")  // e.g., "myeventhub.servicebus.windows.net"
+    val eventHub     = sys.env("AZ_EVENTHUB_NAME")
 
-    // Build Azure ClientSecret credential
+    // -------------------------------
+    // 2️⃣ Verify credentials using MSAL4J
+    // -------------------------------
+    val authority = s"https://login.microsoftonline.com/$tenantId/"
+
+    val app = ConfidentialClientApplication.builder(
+      clientId,
+      ClientCredentialFactory.createFromSecret(clientSecret)
+    ).authority(authority).build()
+
+    val scopes = Collections.singleton("https://eventhubs.azure.net/.default")
+
+    try {
+      val result = app.acquireToken(
+        ClientCredentialParameters.builder(scopes).build()
+      ).get()
+      println(s"✅ Tenant ID and credentials are valid!")
+      println(s"Access token (first 20 chars): ${result.accessToken.substring(0, 20)}...")
+    } catch {
+      case e: Exception =>
+        println(s"❌ Invalid tenant ID or credentials: ${e.getMessage}")
+        return
+    }
+
+    // -------------------------------
+    // 3️⃣ Build Azure credential for Event Hub
+    // -------------------------------
     val credential = new ClientSecretCredentialBuilder()
       .tenantId(tenantId)
       .clientId(clientId)
       .clientSecret(clientSecret)
       .build()
 
-    val namespace = sys.env("AZ_EVENTHUB_NAMESPACE")  // e.g., "myeventhub.servicebus.windows.net"
-    val eventHub  = sys.env("AZ_EVENTHUB_NAME")
-
-    // Create Event Hub producer
     val producer = new EventHubClientBuilder()
       .credential(namespace, eventHub, credential)
       .buildAsyncProducerClient()
 
-    // Create a sample metric
+    // -------------------------------
+    // 4️⃣ Send sample metric
+    // -------------------------------
     val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
     val metricJson = write(metric)
+    val singleEvent = new EventData(metricJson)
 
-    // Send the metric
-    producer.send(new EventData(metricJson)).block()
+    // Wrap single event in Java Iterable
+    producer.send(List(singleEvent).asJava).block()
     println(s"✅ Metric sent: $metricJson")
 
-    // Close producer
     producer.close()
   }
 }
+
 
 
 
