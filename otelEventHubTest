@@ -120,3 +120,62 @@ for jar in target/dependency/*.jar; do
 done
 
 echo "✅ All JARs uploaded to $DBFS_DIR"
+
+
+
+import com.azure.identity.ClientSecretCredentialBuilder
+import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
+
+// -------------------------------
+// 1️⃣ Load credentials from Databricks Secrets
+// -------------------------------
+val tenantId    = dbutils.secrets.get(scope = "azure-sp", key = "tenant-id")
+val clientId    = dbutils.secrets.get(scope = "azure-sp", key = "client-id")
+val clientSecret= dbutils.secrets.get(scope = "azure-sp", key = "client-secret")
+
+// -------------------------------
+// 2️⃣ Build Azure credential
+// -------------------------------
+val credential = new ClientSecretCredentialBuilder()
+  .tenantId(tenantId)
+  .clientId(clientId)
+  .clientSecret(clientSecret)
+  .build()
+
+// -------------------------------
+// 3️⃣ Configure Event Hub client
+// -------------------------------
+val eventHubNamespace = "<YOUR_EVENTHUB_NAMESPACE>.servicebus.windows.net"
+val eventHubName      = "<YOUR_EVENTHUB_NAME>"
+
+val producer = new EventHubClientBuilder()
+  .credential(eventHubNamespace, eventHubName, credential)
+  .buildAsyncProducerClient()
+
+// -------------------------------
+// 4️⃣ Create a sample metric event
+// -------------------------------
+case class Metric(name: String, value: Double, timestamp: Long)
+val sampleMetric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
+
+// Convert metric to JSON string
+import org.json4s.native.Serialization
+import org.json4s.native.Serialization.write
+import org.json4s.NoTypeHints
+
+implicit val formats = Serialization.formats(NoTypeHints)
+val metricJson = write(sampleMetric)
+
+// -------------------------------
+// 5️⃣ Send event to Event Hub
+// -------------------------------
+import reactor.core.scala.publisher.SMono
+
+producer.send(new EventData(metricJson)).block()  // wait until sent
+println(s"✅ Metric sent: $metricJson")
+
+// -------------------------------
+// 6️⃣ Close producer
+// -------------------------------
+producer.close()
+
