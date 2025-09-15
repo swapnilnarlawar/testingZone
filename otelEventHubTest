@@ -1,0 +1,25 @@
+import com.azure.identity.ClientSecretCredentialBuilder
+import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
+import java.util.Arrays
+
+// Replace with SP details (securely load from Key Vault if possible)
+val tenantId = "<TENANT-ID>"
+val clientId = "<APP-ID>"
+val clientSecret = "<CLIENT-SECRET>"
+
+val credential = new ClientSecretCredentialBuilder()
+  .tenantId(tenantId)
+  .clientId(clientId)
+  .clientSecret(clientSecret)
+  .build()
+
+val fullyQualifiedNamespace = "databricks-metrics-ns.servicebus.windows.net"
+val eventHubName = "metrics-hub"
+
+val producer = new EventHubClientBuilder()
+  .credential(fullyQualifiedNamespace, eventHubName, credential)
+  .buildProducerClient()
+
+val event = new EventData("Hello from Databricks with Service Principal RBAC")
+producer.send(Arrays.asList(event))
+println("Event sent successfully!")
