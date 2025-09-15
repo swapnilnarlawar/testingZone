@@ -203,36 +203,49 @@ import org.json4s.native.Serialization
 import org.json4s.native.Serialization.write
 import org.json4s.NoTypeHints
 
-implicit val formats = Serialization.formats(NoTypeHints)
+object EventHubLocalTest {
 
-// Load credentials from environment variables
-val tenantId     = sys.env("AZ_TENANT_ID")
-val clientId     = sys.env("AZ_CLIENT_ID")
-val clientSecret = sys.env("AZ_CLIENT_SECRET")
+  // Implicit formats for JSON serialization
+  implicit val formats = Serialization.formats(NoTypeHints)
 
-val credential = new ClientSecretCredentialBuilder()
-  .tenantId(tenantId)
-  .clientId(clientId)
-  .clientSecret(clientSecret)
-  .build()
+  // Define Metric case class
+  case class Metric(name: String, value: Double, timestamp: Long)
 
-val namespace = sys.env("AZ_EVENTHUB_NAMESPACE")  // e.g., "myeventhub.servicebus.windows.net"
-val eventHub  = sys.env("AZ_EVENTHUB_NAME")
+  def main(args: Array[String]): Unit = {
 
-val producer = new EventHubClientBuilder()
-  .credential(namespace, eventHub, credential)
-  .buildAsyncProducerClient()
+    // Load credentials from environment variables
+    val tenantId     = sys.env("AZ_TENANT_ID")
+    val clientId     = sys.env("AZ_CLIENT_ID")
+    val clientSecret = sys.env("AZ_CLIENT_SECRET")
 
-// Sample metric
-case class Metric(name: String, value: Double, timestamp: Long)
-val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
-val metricJson = write(metric)
+    // Build Azure ClientSecret credential
+    val credential = new ClientSecretCredentialBuilder()
+      .tenantId(tenantId)
+      .clientId(clientId)
+      .clientSecret(clientSecret)
+      .build()
 
-// Send event
-producer.send(new EventData(metricJson)).block()
-println(s"✅ Metric sent: $metricJson")
+    val namespace = sys.env("AZ_EVENTHUB_NAMESPACE")  // e.g., "myeventhub.servicebus.windows.net"
+    val eventHub  = sys.env("AZ_EVENTHUB_NAME")
 
-producer.close()
+    // Create Event Hub producer
+    val producer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .buildAsyncProducerClient()
+
+    // Create a sample metric
+    val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
+    val metricJson = write(metric)
+
+    // Send the metric
+    producer.send(new EventData(metricJson)).block()
+    println(s"✅ Metric sent: $metricJson")
+
+    // Close producer
+    producer.close()
+  }
+}
+
 
 
 
