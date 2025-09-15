@@ -62,3 +62,61 @@ def checkClassExists(className: String): Boolean = {
 dependencies.foreach { case (lib, cls) =>
   println(f"$lib%-25s : ${checkClassExists(cls)}")
 }
+
+
+#!/bin/bash
+
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+TEMP_DIR="./azure-eventhub-jars"
+DBFS_DIR="dbfs:/FileStore/jars"
+
+# Azure SDK versions
+AZURE_IDENTITY_VERSION="1.17.0"
+AZURE_EVENTHUBS_VERSION="5.21.0"
+
+# -------------------------------
+# 1️⃣ Create temporary Maven project
+# -------------------------------
+mkdir -p $TEMP_DIR && cd $TEMP_DIR
+
+# Create minimal pom.xml
+cat <<EOF > pom.xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>azure-eventhub-spark</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <dependencies>
+    <dependency>
+      <groupId>com.azure</groupId>
+      <artifactId>azure-identity</artifactId>
+      <version>${AZURE_IDENTITY_VERSION}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.azure</groupId>
+      <artifactId>azure-messaging-eventhubs</artifactId>
+      <version>${AZURE_EVENTHUBS_VERSION}</version>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+
+# -------------------------------
+# 2️⃣ Download dependencies with Maven
+# -------------------------------
+mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+
+# -------------------------------
+# 3️⃣ Upload all JARs to DBFS
+# -------------------------------
+for jar in target/dependency/*.jar; do
+  echo "Uploading $jar to DBFS..."
+  databricks fs cp "$jar" "$DBFS_DIR/" --overwrite
+done
+
+echo "✅ All JARs uploaded to $DBFS_DIR"
