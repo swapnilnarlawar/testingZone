@@ -197,16 +197,17 @@ libraryDependencies ++= Seq(
 
 
 
-import com.microsoft.aad.msal4j._
 import com.azure.identity.ClientSecretCredentialBuilder
-import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
+import com.azure.messaging.eventhubs._
+import com.azure.messaging.eventhubs.models.EventPosition
 import org.json4s.native.Serialization
 import org.json4s.native.Serialization.write
 import org.json4s.NoTypeHints
-import java.util.Collections
 import scala.jdk.CollectionConverters._
+import reactor.core.publisher.Flux
+import java.util.Collections
 
-object EventHubMetricTest {
+object EventHubSendAndReceive {
 
   implicit val formats = Serialization.formats(NoTypeHints)
 
@@ -215,65 +216,60 @@ object EventHubMetricTest {
   def main(args: Array[String]): Unit = {
 
     // -------------------------------
-    // 1️⃣ Load credentials from env
+    // 1️⃣ Load environment variables
     // -------------------------------
     val tenantId     = sys.env("AZ_TENANT_ID")
     val clientId     = sys.env("AZ_CLIENT_ID")
     val clientSecret = sys.env("AZ_CLIENT_SECRET")
-    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE")  // e.g., "myeventhub.servicebus.windows.net"
+    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE") // e.g., "myeventhub.servicebus.windows.net"
     val eventHub     = sys.env("AZ_EVENTHUB_NAME")
 
-    // -------------------------------
-    // 2️⃣ Verify credentials using MSAL4J
-    // -------------------------------
-    val authority = s"https://login.microsoftonline.com/$tenantId/"
-
-    val app = ConfidentialClientApplication.builder(
-      clientId,
-      ClientCredentialFactory.createFromSecret(clientSecret)
-    ).authority(authority).build()
-
-    val scopes = Collections.singleton("https://eventhubs.azure.net/.default")
-
-    try {
-      val result = app.acquireToken(
-        ClientCredentialParameters.builder(scopes).build()
-      ).get()
-      println(s"✅ Tenant ID and credentials are valid!")
-      println(s"Access token (first 20 chars): ${result.accessToken.substring(0, 20)}...")
-    } catch {
-      case e: Exception =>
-        println(s"❌ Invalid tenant ID or credentials: ${e.getMessage}")
-        return
-    }
-
-    // -------------------------------
-    // 3️⃣ Build Azure credential for Event Hub
-    // -------------------------------
     val credential = new ClientSecretCredentialBuilder()
       .tenantId(tenantId)
       .clientId(clientId)
       .clientSecret(clientSecret)
       .build()
 
+    // -------------------------------
+    // 2️⃣ Send sample metric
+    // -------------------------------
     val producer = new EventHubClientBuilder()
       .credential(namespace, eventHub, credential)
       .buildAsyncProducerClient()
 
-    // -------------------------------
-    // 4️⃣ Send sample metric
-    // -------------------------------
     val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
     val metricJson = write(metric)
-    val singleEvent = new EventData(metricJson)
 
-    // Wrap single event in Java Iterable
+    val singleEvent = new EventData(metricJson)
     producer.send(List(singleEvent).asJava).block()
     println(s"✅ Metric sent: $metricJson")
-
     producer.close()
+
+    // -------------------------------
+    // 3️⃣ Receive metric from Event Hub
+    // -------------------------------
+    val consumer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
+      .buildAsyncConsumerClient()
+
+    val partitions = consumer.getPartitionIds().block()
+    partitions.asScala.foreach { pid =>
+      println(s"Listening on partition: $pid")
+      consumer.receiveFromPartition(pid, EventPosition.latest())
+        .take(5) // read up to 5 messages per partition
+        .subscribe(event => {
+          println(s"📥 Received event from partition $pid: ${event.getBodyAsString()}")
+        })
+    }
+
+    // Wait a few seconds for messages to arrive
+    Thread.sleep(5000)
+    consumer.close()
+    println("Consumer closed.")
   }
 }
+
 
 
 
