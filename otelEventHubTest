@@ -293,3 +293,87 @@ export AZ_CLIENT_SECRET="<your-client-secret>"
 export AZ_EVENTHUB_NAMESPACE="<namespace>.servicebus.windows.net"
 export AZ_EVENTHUB_NAME="<eventhub-name>"
 
+
+
+
+import com.azure.identity.ClientSecretCredentialBuilder
+import com.azure.messaging.eventhubs._
+import com.azure.messaging.eventhubs.models.{EventPosition, PartitionEvent}
+import org.json4s.native.Serialization
+import org.json4s.native.Serialization.write
+import org.json4s.NoTypeHints
+import scala.jdk.CollectionConverters._
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+
+object EventHubSendAndReceiveTest {
+
+  implicit val formats = Serialization.formats(NoTypeHints)
+  case class Metric(name: String, value: Double, timestamp: Long)
+
+  def main(args: Array[String]): Unit = {
+
+    // -------------------------------
+    // 1️⃣ Load credentials and config
+    // -------------------------------
+    val tenantId     = sys.env("AZ_TENANT_ID")
+    val clientId     = sys.env("AZ_CLIENT_ID")
+    val clientSecret = sys.env("AZ_CLIENT_SECRET")
+    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE") // e.g., "myeventhub.servicebus.windows.net"
+    val eventHub     = sys.env("AZ_EVENTHUB_NAME")
+
+    val credential = new ClientSecretCredentialBuilder()
+      .tenantId(tenantId)
+      .clientId(clientId)
+      .clientSecret(clientSecret)
+      .build()
+
+    // -------------------------------
+    // 2️⃣ Create consumer first
+    // -------------------------------
+    val consumer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
+      .buildAsyncConsumerClient()
+
+    val latch = new CountDownLatch(1) // To wait for messages
+
+    val partitions = consumer.getPartitionIds().collectList().block()
+    partitions.asScala.foreach { pid =>
+      println(s"Listening on partition: $pid")
+
+      consumer.receiveFromPartition(pid, EventPosition.latest())
+        .take(1) // read only 1 message for testing
+        .subscribe(
+          (partitionEvent: PartitionEvent) => {
+            val eventData = partitionEvent.getData
+            println(s"📥 Received from $pid: ${eventData.getBodyAsString()}")
+            latch.countDown()
+          },
+          (err: Throwable) => println(s"❌ Error: ${err.getMessage}")
+        )
+    }
+
+    // -------------------------------
+    // 3️⃣ Send sample metric
+    // -------------------------------
+    val producer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .buildAsyncProducerClient()
+
+    val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
+    val metricJson = write(metric)
+
+    producer.send(List(new EventData(metricJson)).asJava).block()
+    println(s"✅ Metric sent: $metricJson")
+    producer.close()
+
+    // -------------------------------
+    // 4️⃣ Wait for consumer to receive message
+    // -------------------------------
+    latch.await() // wait until at least one message is received
+    consumer.close()
+    println("Consumer closed.")
+  }
+}
+
