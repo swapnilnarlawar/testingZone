@@ -263,6 +263,18 @@ object EventHubSendAndReceive {
         })
     }
 
+consumer.receiveFromPartition(pid, EventPosition.latest())
+  .take(5)
+  .subscribe(partitionEvent => {
+    val eventData = partitionEvent.getData
+    if (eventData != null) {
+      println(s"📥 Received from $pid: ${eventData.getBodyAsString()}")
+    } else {
+      println(s"⚠️ No event data received from $pid")
+    }
+  })
+
+
     // Wait a few seconds for messages to arrive
     Thread.sleep(5000)
     consumer.close()
