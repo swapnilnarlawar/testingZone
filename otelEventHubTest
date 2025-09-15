@@ -179,3 +179,66 @@ println(s"✅ Metric sent: $metricJson")
 // -------------------------------
 producer.close()
 
+
+
+name := "EventHubTest"
+version := "0.1"
+scalaVersion := "2.12.15"
+
+libraryDependencies ++= Seq(
+  "com.azure" % "azure-identity" % "1.17.0",
+  "com.azure" % "azure-messaging-eventhubs" % "5.21.0",
+  "com.microsoft.azure" % "msal4j" % "1.31.1",
+  "io.projectreactor" % "reactor-core" % "3.7.11",
+  "io.projectreactor.netty" % "reactor-netty" % "1.2.10",
+  "org.json4s" %% "json4s-native" % "4.0.6",
+  "org.slf4j" % "slf4j-api" % "1.7.36"
+)
+
+
+
+import com.azure.identity.ClientSecretCredentialBuilder
+import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
+import org.json4s.native.Serialization
+import org.json4s.native.Serialization.write
+import org.json4s.NoTypeHints
+
+implicit val formats = Serialization.formats(NoTypeHints)
+
+// Load credentials from environment variables
+val tenantId     = sys.env("AZ_TENANT_ID")
+val clientId     = sys.env("AZ_CLIENT_ID")
+val clientSecret = sys.env("AZ_CLIENT_SECRET")
+
+val credential = new ClientSecretCredentialBuilder()
+  .tenantId(tenantId)
+  .clientId(clientId)
+  .clientSecret(clientSecret)
+  .build()
+
+val namespace = sys.env("AZ_EVENTHUB_NAMESPACE")  // e.g., "myeventhub.servicebus.windows.net"
+val eventHub  = sys.env("AZ_EVENTHUB_NAME")
+
+val producer = new EventHubClientBuilder()
+  .credential(namespace, eventHub, credential)
+  .buildAsyncProducerClient()
+
+// Sample metric
+case class Metric(name: String, value: Double, timestamp: Long)
+val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
+val metricJson = write(metric)
+
+// Send event
+producer.send(new EventData(metricJson)).block()
+println(s"✅ Metric sent: $metricJson")
+
+producer.close()
+
+
+
+export AZ_TENANT_ID="<your-tenant-id>"
+export AZ_CLIENT_ID="<your-client-id>"
+export AZ_CLIENT_SECRET="<your-client-secret>"
+export AZ_EVENTHUB_NAMESPACE="<namespace>.servicebus.windows.net"
+export AZ_EVENTHUB_NAME="<eventhub-name>"
+
