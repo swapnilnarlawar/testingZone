@@ -23,3 +23,42 @@ val producer = new EventHubClientBuilder()
 val event = new EventData("Hello from Databricks with Service Principal RBAC")
 producer.send(Arrays.asList(event))
 println("Event sent successfully!")
+
+
+//
+// List of dependencies to check (map library -> representative class)
+val dependencies = Map(
+  "azure-identity" -> "com.azure.identity.ClientSecretCredentialBuilder",
+  "azure-core" -> "com.azure.core.credential.TokenCredential",
+  "azure-messaging-eventhubs" -> "com.azure.messaging.eventhubs.EventHubClientBuilder",
+  "reactor-core" -> "reactor.core.publisher.Flux",
+  "reactor-netty" -> "reactor.netty.http.client.HttpClient",
+  "slf4j-api" -> "org.slf4j.Logger",
+  "jackson-core" -> "com.fasterxml.jackson.core.JsonFactory",
+  "jackson-databind" -> "com.fasterxml.jackson.databind.ObjectMapper",
+  "jackson-annotations" -> "com.fasterxml.jackson.annotation.JsonProperty",
+  "netty-handler" -> "io.netty.handler.codec.http.HttpClientCodec",
+  "netty-buffer" -> "io.netty.buffer.ByteBuf",
+  "netty-common" -> "io.netty.util.concurrent.Future",
+  "netty-transport" -> "io.netty.channel.Channel",
+  "netty-resolver" -> "io.netty.resolver.DefaultAddressResolverGroup",
+  "msal4j" -> "com.microsoft.aad.msal4j.ConfidentialClientApplication",
+  "commons-codec" -> "org.apache.commons.codec.binary.Base64",
+  "commons-logging" -> "org.apache.commons.logging.Log",
+  "okhttp" -> "okhttp3.OkHttpClient"
+)
+
+// Function to check if class exists
+def checkClassExists(className: String): Boolean = {
+  try {
+    Class.forName(className)
+    true
+  } catch {
+    case _: ClassNotFoundException => false
+  }
+}
+
+// Iterate and print results
+dependencies.foreach { case (lib, cls) =>
+  println(f"$lib%-25s : ${checkClassExists(cls)}")
+}
