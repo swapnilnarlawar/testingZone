@@ -57,30 +57,50 @@ echo "✅ All JARs uploaded to $DBFS_DIR"
 
 
 //build.sbt
-name := "EventHubTest"
-version := "0.1"
-scalaVersion := "2.12.15"
-
-libraryDependencies ++= Seq(
-  "com.azure" % "azure-identity" % "1.17.0",
-  "com.azure" % "azure-messaging-eventhubs" % "5.21.0",
-  "com.microsoft.azure" % "msal4j" % "1.31.1",
-  "io.projectreactor" % "reactor-core" % "3.7.11",
-  "io.projectreactor.netty" % "reactor-netty" % "1.2.10",
-  "org.json4s" %% "json4s-native" % "4.0.6",
-  "org.slf4j" % "slf4j-api" % "1.7.36"
-)
-
 // ----------------------------
-// sbt-assembly plugin settings
+// Project Settings
 // ----------------------------
-ThisBuild / assemblyMergeStrategy := {
-  case PathList("META-INF", xs @ _*) => MergeStrategy.discard
-  case x => MergeStrategy.first
-}
+ThisBuild / version := "0.1.0-SNAPSHOT"
+ThisBuild / scalaVersion := "2.13.0"
 
-// Avoid Scala library being duplicated
-assembly / assemblyOption := (assembly / assemblyOption).value.copy(includeScala = false)
+lazy val root = (project in file("."))
+  .settings(
+    name := "EventHubTest",
+
+    // ----------------------------
+    // Dependencies
+    // ----------------------------
+    libraryDependencies ++= Seq(
+      // Azure SDK (Java)
+      "com.azure" % "azure-identity" % "1.17.0",
+      "com.azure" % "azure-messaging-eventhubs" % "5.21.0",
+
+      // MSAL4J (Java)
+      "com.microsoft.azure" % "msal4j" % "1.31.1",
+
+      // Reactor (Java)
+      "io.projectreactor" % "reactor-core" % "3.7.11",
+      "io.projectreactor.netty" % "reactor-netty" % "1.2.10",
+
+      // JSON (Scala)
+      "org.json4s" %% "json4s-native" % "4.0.6",
+
+      // Logging
+      "org.slf4j" % "slf4j-api" % "1.7.36",
+      "org.slf4j" % "slf4j-simple" % "1.7.36"
+    ),
+
+    // ----------------------------
+    // sbt-assembly settings
+    // ----------------------------
+    assembly / assemblyMergeStrategy := {
+      case PathList("META-INF", xs @ _*) => MergeStrategy.discard
+      case x => MergeStrategy.first
+    },
+
+    assembly / assemblyOption := (assembly / assemblyOption).value.copy(includeScala = false)
+  )
+
 
 
 export AZ_TENANT_ID="<your-tenant-id>"
