@@ -1,69 +1,3 @@
-import com.azure.identity.ClientSecretCredentialBuilder
-import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
-import java.util.Arrays
-
-// Replace with SP details (securely load from Key Vault if possible)
-val tenantId = "<TENANT-ID>"
-val clientId = "<APP-ID>"
-val clientSecret = "<CLIENT-SECRET>"
-
-val credential = new ClientSecretCredentialBuilder()
-  .tenantId(tenantId)
-  .clientId(clientId)
-  .clientSecret(clientSecret)
-  .build()
-
-val fullyQualifiedNamespace = "databricks-metrics-ns.servicebus.windows.net"
-val eventHubName = "metrics-hub"
-
-val producer = new EventHubClientBuilder()
-  .credential(fullyQualifiedNamespace, eventHubName, credential)
-  .buildProducerClient()
-
-val event = new EventData("Hello from Databricks with Service Principal RBAC")
-producer.send(Arrays.asList(event))
-println("Event sent successfully!")
-
-
-//
-// List of dependencies to check (map library -> representative class)
-val dependencies = Map(
-  "azure-identity" -> "com.azure.identity.ClientSecretCredentialBuilder",
-  "azure-core" -> "com.azure.core.credential.TokenCredential",
-  "azure-messaging-eventhubs" -> "com.azure.messaging.eventhubs.EventHubClientBuilder",
-  "reactor-core" -> "reactor.core.publisher.Flux",
-  "reactor-netty" -> "reactor.netty.http.client.HttpClient",
-  "slf4j-api" -> "org.slf4j.Logger",
-  "jackson-core" -> "com.fasterxml.jackson.core.JsonFactory",
-  "jackson-databind" -> "com.fasterxml.jackson.databind.ObjectMapper",
-  "jackson-annotations" -> "com.fasterxml.jackson.annotation.JsonProperty",
-  "netty-handler" -> "io.netty.handler.codec.http.HttpClientCodec",
-  "netty-buffer" -> "io.netty.buffer.ByteBuf",
-  "netty-common" -> "io.netty.util.concurrent.Future",
-  "netty-transport" -> "io.netty.channel.Channel",
-  "netty-resolver" -> "io.netty.resolver.DefaultAddressResolverGroup",
-  "msal4j" -> "com.microsoft.aad.msal4j.ConfidentialClientApplication",
-  "commons-codec" -> "org.apache.commons.codec.binary.Base64",
-  "commons-logging" -> "org.apache.commons.logging.Log",
-  "okhttp" -> "okhttp3.OkHttpClient"
-)
-
-// Function to check if class exists
-def checkClassExists(className: String): Boolean = {
-  try {
-    Class.forName(className)
-    true
-  } catch {
-    case _: ClassNotFoundException => false
-  }
-}
-
-// Iterate and print results
-dependencies.foreach { case (lib, cls) =>
-  println(f"$lib%-25s : ${checkClassExists(cls)}")
-}
-
-
 #!/bin/bash
 
 # -------------------------------
@@ -122,65 +56,7 @@ done
 echo "✅ All JARs uploaded to $DBFS_DIR"
 
 
-
-import com.azure.identity.ClientSecretCredentialBuilder
-import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
-
-// -------------------------------
-// 1️⃣ Load credentials from Databricks Secrets
-// -------------------------------
-val tenantId    = dbutils.secrets.get(scope = "azure-sp", key = "tenant-id")
-val clientId    = dbutils.secrets.get(scope = "azure-sp", key = "client-id")
-val clientSecret= dbutils.secrets.get(scope = "azure-sp", key = "client-secret")
-
-// -------------------------------
-// 2️⃣ Build Azure credential
-// -------------------------------
-val credential = new ClientSecretCredentialBuilder()
-  .tenantId(tenantId)
-  .clientId(clientId)
-  .clientSecret(clientSecret)
-  .build()
-
-// -------------------------------
-// 3️⃣ Configure Event Hub client
-// -------------------------------
-val eventHubNamespace = "<YOUR_EVENTHUB_NAMESPACE>.servicebus.windows.net"
-val eventHubName      = "<YOUR_EVENTHUB_NAME>"
-
-val producer = new EventHubClientBuilder()
-  .credential(eventHubNamespace, eventHubName, credential)
-  .buildAsyncProducerClient()
-
-// -------------------------------
-// 4️⃣ Create a sample metric event
-// -------------------------------
-case class Metric(name: String, value: Double, timestamp: Long)
-val sampleMetric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
-
-// Convert metric to JSON string
-import org.json4s.native.Serialization
-import org.json4s.native.Serialization.write
-import org.json4s.NoTypeHints
-
-implicit val formats = Serialization.formats(NoTypeHints)
-val metricJson = write(sampleMetric)
-
-// -------------------------------
-// 5️⃣ Send event to Event Hub
-// -------------------------------
-import reactor.core.scala.publisher.SMono
-
-producer.send(new EventData(metricJson)).block()  // wait until sent
-println(s"✅ Metric sent: $metricJson")
-
-// -------------------------------
-// 6️⃣ Close producer
-// -------------------------------
-producer.close()
-
-
-
+//build.sbt
 name := "EventHubTest"
 version := "0.1"
 scalaVersion := "2.12.15"
@@ -195,96 +71,16 @@ libraryDependencies ++= Seq(
   "org.slf4j" % "slf4j-api" % "1.7.36"
 )
 
-
-
-import com.azure.identity.ClientSecretCredentialBuilder
-import com.azure.messaging.eventhubs._
-import com.azure.messaging.eventhubs.models.EventPosition
-import org.json4s.native.Serialization
-import org.json4s.native.Serialization.write
-import org.json4s.NoTypeHints
-import scala.jdk.CollectionConverters._
-import reactor.core.publisher.Flux
-import java.util.Collections
-
-object EventHubSendAndReceive {
-
-  implicit val formats = Serialization.formats(NoTypeHints)
-
-  case class Metric(name: String, value: Double, timestamp: Long)
-
-  def main(args: Array[String]): Unit = {
-
-    // -------------------------------
-    // 1️⃣ Load environment variables
-    // -------------------------------
-    val tenantId     = sys.env("AZ_TENANT_ID")
-    val clientId     = sys.env("AZ_CLIENT_ID")
-    val clientSecret = sys.env("AZ_CLIENT_SECRET")
-    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE") // e.g., "myeventhub.servicebus.windows.net"
-    val eventHub     = sys.env("AZ_EVENTHUB_NAME")
-
-    val credential = new ClientSecretCredentialBuilder()
-      .tenantId(tenantId)
-      .clientId(clientId)
-      .clientSecret(clientSecret)
-      .build()
-
-    // -------------------------------
-    // 2️⃣ Send sample metric
-    // -------------------------------
-    val producer = new EventHubClientBuilder()
-      .credential(namespace, eventHub, credential)
-      .buildAsyncProducerClient()
-
-    val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
-    val metricJson = write(metric)
-
-    val singleEvent = new EventData(metricJson)
-    producer.send(List(singleEvent).asJava).block()
-    println(s"✅ Metric sent: $metricJson")
-    producer.close()
-
-    // -------------------------------
-    // 3️⃣ Receive metric from Event Hub
-    // -------------------------------
-    val consumer = new EventHubClientBuilder()
-      .credential(namespace, eventHub, credential)
-      .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
-      .buildAsyncConsumerClient()
-
-    val partitions = consumer.getPartitionIds().block()
-    partitions.asScala.foreach { pid =>
-      println(s"Listening on partition: $pid")
-      consumer.receiveFromPartition(pid, EventPosition.latest())
-        .take(5) // read up to 5 messages per partition
-        .subscribe(event => {
-          println(s"📥 Received event from partition $pid: ${event.getBodyAsString()}")
-        })
-    }
-
-consumer.receiveFromPartition(pid, EventPosition.latest())
-  .take(5)
-  .subscribe(partitionEvent => {
-    val eventData = partitionEvent.getData
-    if (eventData != null) {
-      println(s"📥 Received from $pid: ${eventData.getBodyAsString()}")
-    } else {
-      println(s"⚠️ No event data received from $pid")
-    }
-  })
-
-
-    // Wait a few seconds for messages to arrive
-    Thread.sleep(5000)
-    consumer.close()
-    println("Consumer closed.")
-  }
+// ----------------------------
+// sbt-assembly plugin settings
+// ----------------------------
+ThisBuild / assemblyMergeStrategy := {
+  case PathList("META-INF", xs @ _*) => MergeStrategy.discard
+  case x => MergeStrategy.first
 }
 
-
-
-
+// Avoid Scala library being duplicated
+assembly / assemblyOption := (assembly / assemblyOption).value.copy(includeScala = false)
 
 
 export AZ_TENANT_ID="<your-tenant-id>"
@@ -295,85 +91,161 @@ export AZ_EVENTHUB_NAME="<eventhub-name>"
 
 
 
-
 import com.azure.identity.ClientSecretCredentialBuilder
 import com.azure.messaging.eventhubs._
-import com.azure.messaging.eventhubs.models.{EventPosition, PartitionEvent}
+import com.azure.messaging.eventhubs.models.EventPosition
+import com.microsoft.aad.msal4j._
 import org.json4s.native.Serialization
 import org.json4s.native.Serialization.write
 import org.json4s.NoTypeHints
 import scala.jdk.CollectionConverters._
 import java.util.Collections
-import java.util.concurrent.CountDownLatch
 
-object EventHubSendAndReceiveTest {
+object EventHubEndToEnd {
 
+  // JSON serializer
   implicit val formats = Serialization.formats(NoTypeHints)
+
+  // Metric model
   case class Metric(name: String, value: Double, timestamp: Long)
 
-  def main(args: Array[String]): Unit = {
+  // -------------------------------
+  // 🔍 Step 1: Check dependencies
+  // -------------------------------
+  val dependencies = Map(
+    "azure-identity" -> "com.azure.identity.ClientSecretCredentialBuilder",
+    "azure-core" -> "com.azure.core.credential.TokenCredential",
+    "azure-messaging-eventhubs" -> "com.azure.messaging.eventhubs.EventHubClientBuilder",
+    "reactor-core" -> "reactor.core.publisher.Flux",
+    "reactor-netty" -> "reactor.netty.http.client.HttpClient",
+    "slf4j-api" -> "org.slf4j.Logger",
+    "jackson-core" -> "com.fasterxml.jackson.core.JsonFactory",
+    "jackson-databind" -> "com.fasterxml.jackson.databind.ObjectMapper",
+    "jackson-annotations" -> "com.fasterxml.jackson.annotation.JsonProperty",
+    "netty-handler" -> "io.netty.handler.codec.http.HttpClientCodec",
+    "netty-buffer" -> "io.netty.buffer.ByteBuf",
+    "netty-common" -> "io.netty.util.concurrent.Future",
+    "netty-transport" -> "io.netty.channel.Channel",
+    "netty-resolver" -> "io.netty.resolver.DefaultAddressResolverGroup",
+    "msal4j" -> "com.microsoft.aad.msal4j.ConfidentialClientApplication",
+    "commons-codec" -> "org.apache.commons.codec.binary.Base64",
+    "commons-logging" -> "org.apache.commons.logging.Log",
+    "okhttp" -> "okhttp3.OkHttpClient"
+  )
 
-    // -------------------------------
-    // 1️⃣ Load credentials and config
-    // -------------------------------
-    val tenantId     = sys.env("AZ_TENANT_ID")
-    val clientId     = sys.env("AZ_CLIENT_ID")
-    val clientSecret = sys.env("AZ_CLIENT_SECRET")
-    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE") // e.g., "myeventhub.servicebus.windows.net"
-    val eventHub     = sys.env("AZ_EVENTHUB_NAME")
-
-    val credential = new ClientSecretCredentialBuilder()
-      .tenantId(tenantId)
-      .clientId(clientId)
-      .clientSecret(clientSecret)
-      .build()
-
-    // -------------------------------
-    // 2️⃣ Create consumer first
-    // -------------------------------
-    val consumer = new EventHubClientBuilder()
-      .credential(namespace, eventHub, credential)
-      .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
-      .buildAsyncConsumerClient()
-
-    val latch = new CountDownLatch(1) // To wait for messages
-
-    val partitions = consumer.getPartitionIds().collectList().block()
-    partitions.asScala.foreach { pid =>
-      println(s"Listening on partition: $pid")
-
-      consumer.receiveFromPartition(pid, EventPosition.latest())
-        .take(1) // read only 1 message for testing
-        .subscribe(
-          (partitionEvent: PartitionEvent) => {
-            val eventData = partitionEvent.getData
-            println(s"📥 Received from $pid: ${eventData.getBodyAsString()}")
-            latch.countDown()
-          },
-          (err: Throwable) => println(s"❌ Error: ${err.getMessage}")
-        )
+  def checkClassExists(className: String): Boolean = {
+    try {
+      Class.forName(className)
+      true
+    } catch {
+      case _: ClassNotFoundException => false
     }
+  }
 
-    // -------------------------------
-    // 3️⃣ Send sample metric
-    // -------------------------------
+  // -------------------------------
+  // 🔑 Step 2: Verify credentials
+  // -------------------------------
+  def verifyCredentials(tenantId: String, clientId: String, clientSecret: String): Boolean = {
+    val authority = s"https://login.microsoftonline.com/$tenantId/"
+    val app = ConfidentialClientApplication.builder(
+      clientId,
+      ClientCredentialFactory.createFromSecret(clientSecret)
+    ).authority(authority).build()
+
+    val scopes = Collections.singleton("https://eventhubs.azure.net/.default")
+
+    try {
+      val result = app.acquireToken(
+        ClientCredentialParameters.builder(scopes).build()
+      ).get()
+      println(s"✅ Credentials valid. Token begins with: ${result.accessToken.substring(0, 20)}...")
+      true
+    } catch {
+      case e: Exception =>
+        println(s"❌ Invalid credentials: ${e.getMessage}")
+        false
+    }
+  }
+
+  // -------------------------------
+  // 📤 Step 3: Send metric
+  // -------------------------------
+  def sendMetric(namespace: String, eventHub: String, credential: com.azure.core.credential.TokenCredential): Unit = {
     val producer = new EventHubClientBuilder()
       .credential(namespace, eventHub, credential)
       .buildAsyncProducerClient()
 
     val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
     val metricJson = write(metric)
+    val event = new EventData(metricJson)
 
-    producer.send(List(new EventData(metricJson)).asJava).block()
+    producer.send(Seq(event).asJava).block()
     println(s"✅ Metric sent: $metricJson")
     producer.close()
+  }
 
-    // -------------------------------
-    // 4️⃣ Wait for consumer to receive message
-    // -------------------------------
-    latch.await() // wait until at least one message is received
+  // -------------------------------
+  // 📥 Step 4: Receive metric
+  // -------------------------------
+  def receiveMetrics(namespace: String, eventHub: String, credential: com.azure.core.credential.TokenCredential): Unit = {
+    val consumer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
+      .buildAsyncConsumerClient()
+
+    val partitions = consumer.getPartitionIds().block()
+    partitions.asScala.foreach { pid =>
+      println(s"Listening on partition: $pid")
+      consumer.receiveFromPartition(pid, EventPosition.latest())
+        .take(5)
+        .subscribe(event => {
+          val data = event.getData
+          if (data != null) {
+            println(s"📥 Received from partition $pid: ${data.getBodyAsString()}")
+          }
+        })
+    }
+
+    Thread.sleep(5000)
     consumer.close()
-    println("Consumer closed.")
+  }
+
+  // -------------------------------
+  // 🚀 Main entry point
+  // -------------------------------
+  def main(args: Array[String]): Unit = {
+
+    // Load env vars
+    val tenantId     = sys.env("AZ_TENANT_ID")
+    val clientId     = sys.env("AZ_CLIENT_ID")
+    val clientSecret = sys.env("AZ_CLIENT_SECRET")
+    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE") // e.g. "xxx.servicebus.windows.net"
+    val eventHub     = sys.env("AZ_EVENTHUB_NAME")
+
+    // Step 1: Check dependencies
+    println("🔍 Dependency check:")
+    dependencies.foreach { case (lib, cls) =>
+      println(f"$lib%-25s : ${checkClassExists(cls)}")
+    }
+
+    // Step 2: Verify credentials
+    if (!verifyCredentials(tenantId, clientId, clientSecret)) {
+      sys.error("❌ Exiting due to invalid credentials")
+    }
+
+    // Build Azure credential
+    val credential = new ClientSecretCredentialBuilder()
+      .tenantId(tenantId)
+      .clientId(clientId)
+      .clientSecret(clientSecret)
+      .build()
+
+    // Step 3: Send a sample metric
+    sendMetric(namespace, eventHub, credential)
+
+    // Step 4: Receive metric
+    receiveMetrics(namespace, eventHub, credential)
   }
 }
+
 
