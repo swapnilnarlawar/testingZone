@@ -268,4 +268,19 @@ object EventHubEndToEnd {
   }
 }
 
+//plugins.sbt
+// File: <project-root>/project/plugins.sbt
+
+// Only use internal Nexus resolver
+resolvers := Seq(
+  "Internal Nexus" at "https://your.nexus.repo/repository/maven-public/"
+)
+
+// Example plugins (versions must exist in Nexus)
+addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "1.1.0")
+addSbtPlugin("com.typesafe.sbt" % "sbt-native-packager" % "1.9.12")
+addSbtPlugin("org.scalameta" % "sbt-scalafmt" % "2.4.6")
+
+// Disable default snapshot updates to avoid network calls
+updateOptions := updateOptions.value.withLatestSnapshots(false)
 
