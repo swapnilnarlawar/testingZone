@@ -284,3 +284,14 @@ addSbtPlugin("org.scalameta" % "sbt-scalafmt" % "2.4.6")
 // Disable default snapshot updates to avoid network calls
 updateOptions := updateOptions.value.withLatestSnapshots(false)
 
+
+
+
+
+// Print values (mask sensitive)
+    println("🔧 Loaded configuration:")
+    println(s"  Tenant ID   : $tenantId")
+    println(s"  Client ID   : $clientId")
+    println(s"  Namespace   : $namespace")
+    println(s"  Event Hub   : $eventHub")
+    println(s"  ClientSecret: ${if (clientSecret.nonEmpty) "**** (hidden)" else "(not set)"}")
