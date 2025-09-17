@@ -401,3 +401,127 @@ org.slf4j.simpleLogger.showThreadName=false
 org.slf4j.simpleLogger.showLogName=true
 
 
+
+
+import com.azure.identity.ClientSecretCredentialBuilder
+import com.azure.messaging.eventhubs._
+import com.azure.messaging.eventhubs.models.{EventPosition, PartitionEvent}
+import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
+import com.microsoft.aad.msal4j._
+import org.json4s.native.Serialization
+import org.json4s.native.Serialization.write
+import org.json4s.NoTypeHints
+import java.util.Collections
+import scala.collection.JavaConverters._
+import reactor.core.publisher.{Flux, Mono}
+
+object EventHubTest {
+
+  implicit val formats = Serialization.formats(NoTypeHints)
+
+  case class Metric(name: String, value: Double, timestamp: Long)
+
+  // -------------------------------
+  // 🔑 Step 2: Verify credentials
+  // -------------------------------
+  def verifyCredentials(tenantId: String, clientId: String, clientSecret: String): Boolean = {
+    val authority = s"https://login.microsoftonline.com/$tenantId/"
+    val app = ConfidentialClientApplication.builder(
+      clientId,
+      ClientCredentialFactory.createFromSecret(clientSecret)
+    ).authority(authority).build()
+
+    val scopes = Collections.singleton("https://eventhubs.azure.net/.default")
+
+    try {
+      val result = app.acquireToken(ClientCredentialParameters.builder(scopes).build()).get()
+      println(s"✅ Credentials valid. Token begins with: ${result.accessToken.substring(0, 20)}...")
+      true
+    } catch {
+      case e: Exception =>
+        println(s"❌ Invalid credentials: ${e.getMessage}")
+        false
+    }
+  }
+
+  // -------------------------------
+  // 📤 Send metric
+  // -------------------------------
+  def sendMetric(namespace: String, eventHub: String, credential: com.azure.core.credential.TokenCredential): Mono[Void] = {
+    val producer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .buildAsyncProducerClient()
+
+    val metric = Metric("cpu_usage_percent", 42.5, System.currentTimeMillis())
+    val metricJson = write(metric)
+    val event = new EventData(metricJson)
+
+    println(s"➡️ Sending metric: $metricJson")
+    producer.send(Seq(event).asJava)
+      .doOnTerminate(() => producer.close())
+  }
+
+  // -------------------------------
+  // 📥 Receive metric fully async
+  // -------------------------------
+  def receiveMetrics(namespace: String, eventHub: String, credential: com.azure.core.credential.TokenCredential): Mono[Void] = {
+    val consumer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
+      .buildAsyncConsumerClient()
+
+    val partitions: java.util.List[String] = consumer.getPartitionIds().collectList().block()
+
+    // Create a Flux for each partition
+    val partitionFluxes = partitions.asScala.map { pid =>
+      consumer.receiveFromPartition(pid, EventPosition.latest())
+        .take(5)
+        .doOnNext { pe =>
+          val data = pe.getData
+          if (data != null) println(s"📥 Received from partition $pid: ${data.getBodyAsString()}")
+        }
+        .doOnError(e => println(s"❌ Error on partition $pid: ${e.getMessage}"))
+        .doOnComplete(() => println(s"✅ Completed partition $pid"))
+    }
+
+    // Merge all partition streams and convert to Mono<Void>
+    Flux.merge(partitionFluxes: _*)
+      .then()
+      .doFinally(_ => {
+        consumer.close()
+        println("Consumer closed")
+      })
+  }
+
+  // -------------------------------
+  // 🚀 Main entry point
+  // -------------------------------
+  def main(args: Array[String]): Unit = {
+    val tenantId     = sys.env("AZ_TENANT_ID")
+    val clientId     = sys.env("AZ_CLIENT_ID")
+    val clientSecret = sys.env("AZ_CLIENT_SECRET")
+    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE")
+    val eventHub     = sys.env("AZ_EVENTHUB_NAME")
+
+    if (!verifyCredentials(tenantId, clientId, clientSecret)) sys.error("❌ Invalid credentials")
+
+    val credential = new ClientSecretCredentialBuilder()
+      .tenantId(tenantId)
+      .clientId(clientId)
+      .clientSecret(clientSecret)
+      .build()
+
+    println("✅ Starting fully async metric receiver...")
+
+    // Combine send + receive fully async
+    val flow = for {
+      _ <- sendMetric(namespace, eventHub, credential)
+      _ <- receiveMetrics(namespace, eventHub, credential)
+    } yield ()
+
+    // Block main thread until all async processing completes
+    flow.block()
+    println("All done!")
+  }
+}
+
