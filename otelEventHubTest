@@ -380,3 +380,24 @@ object EventHubTestReactive {
   }
 }
 
+
+# Set default log level to WARN (suppress INFO/DEBUG from most libs)
+org.slf4j.simpleLogger.defaultLogLevel=warn
+
+# Suppress logs from Reactor
+org.slf4j.simpleLogger.log.reactor=warn
+org.slf4j.simpleLogger.log.reactor.netty=warn
+
+# Suppress verbose logs from Azure SDK internals
+org.slf4j.simpleLogger.log.com.azure=warn
+
+# Keep your application logs visible
+org.slf4j.simpleLogger.log.EventHubTest=info
+
+# Show timestamps and log level in console
+org.slf4j.simpleLogger.showDateTime=true
+org.slf4j.simpleLogger.dateTimeFormat=yyyy-MM-dd HH:mm:ss.SSS
+org.slf4j.simpleLogger.showThreadName=false
+org.slf4j.simpleLogger.showLogName=true
+
+
