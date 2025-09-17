@@ -111,3 +111,48 @@ try {
               case ex: Exception =>
                 println(s"⚠️ Failed to parse OTLP metric: ${ex.getMessage}")
             }
+
+
+
+
+    // --- Register first_gauge_m922633 ---
+    meter.gaugeBuilder("first_gauge_m922633")
+      .setDescription("First gauge metric")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        measurement.record(42.5, io.opentelemetry.api.common.Attributes.builder()
+          .put("cmdbReference", "AT12345")
+          .put("environment", "dev")
+          .build()
+        )
+      }
+
+    // --- Register multi_datapoint_metric ---
+    meter.gaugeBuilder("multi_datapoint_metric")
+      .setDescription("Multi datapoint gauge")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        measurement.record(77.7, io.opentelemetry.api.common.Attributes.builder()
+          .put("cmdbReference", "AT12345")
+          .put("environment", "dev")
+          .build()
+        )
+        measurement.record(88.8, io.opentelemetry.api.common.Attributes.builder()
+          .put("cmdbReference", "AT12345")
+          .put("environment", "qa")
+          .build()
+        )
+      }
+
+    println("✅ Metrics registered in OpenTelemetry SDK")
+
+    // --- Collect metrics from SDK ---
+    val metrics: java.util.Collection[MetricData] = meterProvider.collectAllMetrics()
+
+    // --- Export metrics to OTLP bytes ---
+    val exporter = OtlpGrpcMetricExporter.builder().build()
+
+    metrics.asScala.foreach { metric =>
+      val protoBytes = exporter.toProto(metric) // get protobuf bytes
+      val event = new EventData(protoBytes)
+      producer.send(Collections.singletonList(event)).block()
+      println(s"✅ Metric sent to Event Hub: ${metric.getName}")
+    }
