@@ -89,3 +89,25 @@ object Main {
     println("Metrics also available for SDK export via GlobalOpenTelemetry if OTLP collector is attached")
   }
 }
+
+
+try {
+              // Decode OTLP protobuf
+              val metricsRequest = ExportMetricsServiceRequest.parseFrom(data.getBody)
+              println(s"📥 Partition $pid | Decoded OTLP Metrics:")
+              metricsRequest.getResourceMetricsList.asScala.foreach { rm: ResourceMetrics =>
+                println(s"  Resource: ${rm.getResource.getAttributesList.asScala.map(attr => s"${attr.getKey}=${attr.getValue}").mkString(", ")}")
+                rm.getScopeMetricsList.asScala.foreach { scopeMetric =>
+                  scopeMetric.getMetricsList.asScala.foreach { metric =>
+                    println(s"    Metric name: ${metric.getName}")
+                    metric.getGauge.getDataPointsList.asScala.foreach { dp =>
+                      println(s"      Value: ${dp.getAsDouble}")
+                      println(s"      Attributes: ${dp.getAttributesList.asScala.map(attr => s"${attr.getKey}=${attr.getValue}").mkString(", ")}")
+                    }
+                  }
+                }
+              }
+            } catch {
+              case ex: Exception =>
+                println(s"⚠️ Failed to parse OTLP metric: ${ex.getMessage}")
+            }
