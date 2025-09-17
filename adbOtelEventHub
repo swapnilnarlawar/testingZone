@@ -1,0 +1,228 @@
+import com.azure.identity.ClientSecretCredentialBuilder
+import com.azure.messaging.eventhubs._
+import com.azure.messaging.eventhubs.models._
+import com.microsoft.aad.msal4j._
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.common.Attributes
+import io.opentelemetry.api.metrics.{Meter, ObservableDoubleMeasurement}
+import org.json4s.JsonDSL._
+import org.json4s.native.JsonMethods._
+
+import java.util
+import java.util.Collections
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import scala.collection.JavaConverters._
+
+object OTelEventHubBridge {
+
+  // -------------------------------
+  // Verify credentials
+  // -------------------------------
+  def verifyCredentials(tenantId: String, clientId: String, clientSecret: String): Boolean = {
+    val authority = s"https://login.microsoftonline.com/$tenantId/"
+    val app = ConfidentialClientApplication.builder(
+      clientId,
+      ClientCredentialFactory.createFromSecret(clientSecret)
+    ).authority(authority).build()
+
+    val scopes = Collections.singleton("https://eventhubs.azure.net/.default")
+    try {
+      val result = app.acquireToken(ClientCredentialParameters.builder(scopes).build()).get()
+      println(s"✅ Credentials valid. Token begins with: ${result.accessToken.substring(0, 20)}...")
+      true
+    } catch {
+      case e: Exception =>
+        println(s"❌ Invalid credentials: ${e.getMessage}")
+        false
+    }
+  }
+
+  // -------------------------------
+  // Build OTLP JSON for a single metric
+  // -------------------------------
+  def buildOtlpJson(
+      metricName: String,
+      metricType: String, // "gauge" or "sum"
+      value: Double,
+      attributes: Map[String, String]
+  ): String = {
+    val nowNano: Long = System.currentTimeMillis() * 1000000L
+
+    val datapoint =
+      ("asDouble" -> value) ~
+        ("timeUnixNano" -> nowNano) ~
+        ("attributes" -> attributes.map {
+          case (k, v) => ("key" -> k) ~ ("value" -> ("stringValue" -> v))
+        }.toList)
+
+    val metricBlock = metricType match {
+      case "gauge" =>
+        ("name" -> metricName) ~
+          ("description" -> s"$metricName metric") ~
+          ("unit" -> "") ~
+          ("gauge" -> ("dataPoints" -> List(datapoint)))
+      case "sum" =>
+        ("name" -> metricName) ~
+          ("description" -> s"$metricName metric") ~
+          ("unit" -> "1") ~
+          ("sum" ->
+            ("isMonotonic" -> true) ~
+              ("aggregationTemporality" -> "AGGREGATION_TEMPORALITY_CUMULATIVE") ~
+              ("dataPoints" -> List(datapoint)))
+    }
+
+    val scopeMetrics =
+      ("scope" -> ("name" -> "m922633_otel-meter")) ~
+        ("metrics" -> List(metricBlock))
+
+    val resourceMetrics =
+      ("resource" ->
+        ("attributes" -> List(
+          ("key" -> "service.name") ~ ("value" -> ("stringValue" -> "eventhub-otel-bridge")),
+          ("key" -> "host.name") ~ ("value" -> ("stringValue" -> sys.env.getOrElse("HOSTNAME", "unknown-host")))
+        ))
+      ) ~
+        ("scopeMetrics" -> List(scopeMetrics))
+
+    compact(render(("resourceMetrics" -> List(resourceMetrics))))
+  }
+
+  // -------------------------------
+  // Send multiple OTLP JSON messages (one per metric) to Event Hub
+  // -------------------------------
+  def sendMetricsToEventHub(
+      namespace: String,
+      eventHub: String,
+      credential: com.azure.core.credential.TokenCredential,
+      otlpMessages: Seq[String]
+  ): Unit = {
+    val producer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .buildAsyncProducerClient()
+
+    val events = otlpMessages.map(json => new EventData(json)).asJava
+    producer.send(events).block()
+    println(s"✅ Sent ${otlpMessages.size} OTLP metrics to Event Hub")
+    producer.close()
+  }
+
+  // -------------------------------
+  // Receive metrics back from Event Hub (for verification)
+  // -------------------------------
+  def receiveMetricsFromEventHub(
+      namespace: String,
+      eventHub: String,
+      consumerGroup: String,
+      credential: com.azure.core.credential.TokenCredential,
+      maxEvents: Int
+  ): Unit = {
+    val latch = new CountDownLatch(1)
+
+    val processor = new EventProcessorClientBuilder()
+      .credential(namespace, eventHub, consumerGroup, credential)
+      .processEvent { eventCtx: EventContext =>
+        val event = eventCtx.getEvent
+        println(s"📩 Received event from partition ${eventCtx.getPartitionContext.getPartitionId}: ${event.getBodyAsString}")
+        eventCtx.updateCheckpoint()
+      }
+      .processError { errorCtx: ErrorContext =>
+        println(s"❌ Error on partition ${errorCtx.getPartitionContext.getPartitionId}: ${errorCtx.getThrowable.getMessage}")
+      }
+      .checkpointStore(new InMemoryCheckpointStore())
+      .buildEventProcessorClient()
+
+    println("▶️ Starting EventProcessorClient to receive metrics...")
+    processor.start()
+
+    // Let it receive a few events
+    latch.await(15, TimeUnit.SECONDS)
+
+    processor.stop()
+    println("⏹️ Stopped EventProcessorClient")
+  }
+
+  // -------------------------------
+  // Register metrics locally with OTel SDK
+  // -------------------------------
+  def registerMetricsWithSdk(): Unit = {
+    val meter: Meter = GlobalOpenTelemetry.getMeter("m922633_otel-meter")
+
+    // Metric 1: Gauge
+    meter.gaugeBuilder("first_gauge_m922633")
+      .setDescription("First gauge metric")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        measurement.record(42.5, Attributes.builder()
+          .put("environment", "dev")
+          .put("cmdbReference", "AT12345")
+          .build())
+      }
+
+    // Metric 2: Counter
+    val counter = meter.counterBuilder("records_processed_total_m922633")
+      .setDescription("Total records processed")
+      .ofLongs()
+      .build()
+    counter.add(12345L,
+      Attributes.builder()
+        .put("environment", "qa")
+        .put("cmdbReference", "AT12345")
+        .build())
+
+    // Metric 3: Multi-datapoint Gauge
+    meter.gaugeBuilder("multi_datapoint_metric")
+      .setDescription("Third gauge metric with multiple datapoints")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        measurement.record(
+          77.7,
+          Attributes.builder().put("environment", "dev").put("cmdbReference", "AT12345").build()
+        )
+        measurement.record(
+          88.8,
+          Attributes.builder().put("environment", "qa").put("cmdbReference", "AT12345").build()
+        )
+      }
+
+    println("✅ Metrics registered with OTel SDK (exporter/agent will export them)")
+  }
+
+  // -------------------------------
+  // Main
+  // -------------------------------
+  def main(args: Array[String]): Unit = {
+    val tenantId = sys.env("AZ_TENANT_ID")
+    val clientId = sys.env("AZ_CLIENT_ID")
+    val clientSecret = sys.env("AZ_CLIENT_SECRET")
+    val namespace = sys.env("AZ_EVENTHUB_NAMESPACE")
+    val eventHub = sys.env("AZ_EVENTHUB_NAME")
+    val consumerGroup = sys.env.getOrElse("AZ_EVENTHUB_CONSUMER_GROUP", EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
+
+    if (!verifyCredentials(tenantId, clientId, clientSecret)) {
+      sys.error("❌ Invalid credentials, exiting")
+    }
+
+    val credential = new ClientSecretCredentialBuilder()
+      .tenantId(tenantId)
+      .clientId(clientId)
+      .clientSecret(clientSecret)
+      .build()
+
+    // Register metrics with SDK (these go to OTLP collector via agent)
+    registerMetricsWithSdk()
+
+    // Build OTLP JSON messages (one per metric) to send to Event Hub
+    val otlpMessages = Seq(
+      buildOtlpJson("first_gauge_m922633", "gauge", 42.5, Map("environment" -> "dev", "cmdbReference" -> "AT12345")),
+      buildOtlpJson("records_processed_total_m922633", "sum", 12345.0, Map("environment" -> "qa", "cmdbReference" -> "AT12345")),
+      buildOtlpJson("multi_datapoint_metric", "gauge", 77.7, Map("environment" -> "dev", "cmdbReference" -> "AT12345")),
+      buildOtlpJson("multi_datapoint_metric", "gauge", 88.8, Map("environment" -> "qa", "cmdbReference" -> "AT12345"))
+    )
+
+    // Send them to Event Hub
+    sendMetricsToEventHub(namespace, eventHub, credential, otlpMessages)
+
+    // Receive them back from Event Hub
+    receiveMetricsFromEventHub(namespace, eventHub, consumerGroup, credential, maxEvents = 10)
+
+    println("🚀 Done. Metrics exported via OTLP and round-tripped through Event Hub")
+  }
+}
