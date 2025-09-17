@@ -156,3 +156,113 @@ try {
       producer.send(Collections.singletonList(event)).block()
       println(s"✅ Metric sent to Event Hub: ${metric.getName}")
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+import com.azure.identity.ClientSecretCredentialBuilder
+import com.azure.messaging.eventhubs.{EventData, EventHubClientBuilder}
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.metrics.{Meter, ObservableDoubleMeasurement}
+import io.opentelemetry.api.common.Attributes
+import io.opentelemetry.sdk.metrics.SdkMeterProvider
+import io.opentelemetry.sdk.resources.Resource
+import io.opentelemetry.semconv.resource.attributes.ResourceAttributes
+import org.json4s.native.Serialization
+import org.json4s.native.Serialization.write
+import org.json4s.NoTypeHints
+import scala.collection.JavaConverters._
+import java.util.Collections
+
+object OtelMetricsToEventHub {
+
+  // JSON serializer
+  implicit val formats = Serialization.formats(NoTypeHints)
+
+  def main(args: Array[String]): Unit = {
+
+    // --------- Load Azure Event Hub credentials ---------
+    val tenantId     = sys.env("AZ_TENANT_ID")
+    val clientId     = sys.env("AZ_CLIENT_ID")
+    val clientSecret = sys.env("AZ_CLIENT_SECRET")
+    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE")
+    val eventHubName = sys.env("AZ_EVENTHUB_NAME")
+    val consumerGroup= EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME
+
+    // --------- Build Azure credential ---------
+    val credential = new ClientSecretCredentialBuilder()
+      .tenantId(tenantId)
+      .clientId(clientId)
+      .clientSecret(clientSecret)
+      .build()
+
+    // --------- Build Event Hub Producer ---------
+    val producer = new EventHubClientBuilder()
+      .credential(namespace, eventHubName, credential)
+      .buildAsyncProducerClient()
+
+    // --------- Build OpenTelemetry Meter ---------
+    val meterProvider = SdkMeterProvider.builder()
+      .setResource(Resource.builder()
+        .put(ResourceAttributes.SERVICE_NAME, "otel-eventhub-service")
+        .build())
+      .build()
+
+    GlobalOpenTelemetry.set(meterProvider)
+    val meter: Meter = GlobalOpenTelemetry.getMeter("otel-eventhub-meter")
+
+    // --------- Helper function to send metric to Event Hub ---------
+    def sendMetricToEventHub(name: String, value: Double, attrs: Map[String, String]): Unit = {
+      val metricJson = write(Map(
+        "name" -> name,
+        "value" -> value,
+        "timestamp" -> System.currentTimeMillis(),
+        "attributes" -> attrs
+      ))
+      val event = new EventData(metricJson)
+      producer.send(Collections.singletonList(event)).block()
+      println(s"📤 Metric sent to Event Hub: $metricJson")
+    }
+
+    // --------- Register metrics ---------
+    // Metric 1: Single datapoint gauge
+    meter.gaugeBuilder("first_gauge_m922633")
+      .setDescription("First gauge metric")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        val value = 42.5
+        val labels = Map("environment" -> "dev", "cmdbReference" -> "AT12345")
+        measurement.record(value, Attributes.builder().put("environment", "dev").put("cmdbReference", "AT12345").build())
+        sendMetricToEventHub("first_gauge_m922633", value, labels)
+      }
+
+    // Metric 2: Multi-datapoint gauge
+    meter.gaugeBuilder("multi_datapoint_metric")
+      .setDescription("Third gauge metric with multiple datapoints")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        val points = Seq(
+          (77.7, Map("environment" -> "dev", "cmdbReference" -> "AT12345")),
+          (88.8, Map("environment" -> "qa", "cmdbReference" -> "AT12345"))
+        )
+        points.foreach { case (value, labels) =>
+          measurement.record(value, Attributes.builder().put("environment", labels("environment")).put("cmdbReference", labels("cmdbReference")).build())
+          sendMetricToEventHub("multi_datapoint_metric", value, labels)
+        }
+      }
+
+    println("✅ Metrics registered. Emitting metrics...")
+
+    // Keep JVM alive so callbacks run
+    while (true) {
+      Thread.sleep(10000)
+    }
+  }
+}
