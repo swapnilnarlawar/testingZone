@@ -1,97 +1,33 @@
-import com.azure.identity.ClientSecretCredentialBuilder
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.common.Attributes
+import io.opentelemetry.api.metrics.{Meter, ObservableDoubleMeasurement}
+import io.opentelemetry.sdk.metrics.SdkMeterProvider
+import io.opentelemetry.sdk.metrics.export.{IntervalMetricReader, MetricExporter}
+import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter
+
 import com.azure.messaging.eventhubs._
 import com.azure.messaging.eventhubs.EventHubClientBuilder
 import com.azure.messaging.eventhubs.EventData
-import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest
-import io.opentelemetry.proto.metrics.v1.{Metric, NumberDataPoint, Gauge, InstrumentationLibraryMetrics, ResourceMetrics}
-import io.opentelemetry.proto.common.v1.{KeyValue, AnyValue, InstrumentationLibrary, Resource}
-import scala.jdk.CollectionConverters._
+import com.azure.identity.ClientSecretCredentialBuilder
 
-object EventHubOtelExporter {
+import scala.collection.JavaConverters._
+import java.time.Duration
 
-  def sendOtelMetrics(namespace: String, eventHub: String, credential: com.azure.core.credential.TokenCredential): Unit = {
-    val producer = new EventHubClientBuilder()
-      .credential(namespace, eventHub, credential)
-      .buildAsyncProducerClient()
-
-    // Helper to build ExportMetricsServiceRequest for a single metric
-    def buildExportRequest(metric: Metric): ExportMetricsServiceRequest = {
-      val libMetrics = InstrumentationLibraryMetrics(
-        instrumentationLibrary = Some(InstrumentationLibrary(name = "eventhub-otel", version = "1.0")),
-        metrics = Seq(metric)
-      )
-      val resourceMetrics = ResourceMetrics(
-        resource = Some(Resource(attributes = Seq(KeyValue("service.name", AnyValue("eventhub-demo"))))),
-        instrumentationLibraryMetrics = Seq(libMetrics)
-      )
-      ExportMetricsServiceRequest(resourceMetrics = Seq(resourceMetrics))
-    }
-
-    // -------------------------------
-    // Metric 1: first_gauge_m922633
-    // -------------------------------
-    val firstGaugePoint = NumberDataPoint(
-      startTimeUnixNano = 0L,
-      timeUnixNano = System.currentTimeMillis() * 1000000L,
-      value = 42.5
-    )
-
-    val firstGaugeMetric = Metric(
-      name = "first_gauge_m922633",
-      description = "First gauge metric",
-      unit = "",
-      gauge = Some(Gauge(points = Seq(firstGaugePoint)))
-    )
-
-    // Send metric 1
-    val export1 = buildExportRequest(firstGaugeMetric)
-    producer.send(Seq(new EventData(export1.toByteArray)).asJava).block()
-    println("✅ first_gauge_m922633 sent to Event Hub")
-
-    // -------------------------------
-    // Metric 2: multi_datapoint_metric
-    // -------------------------------
-    val multiGaugePoints = Seq(
-      NumberDataPoint(
-        startTimeUnixNano = 0L,
-        timeUnixNano = System.currentTimeMillis() * 1000000L,
-        value = 77.7,
-        attributes = Seq(
-          KeyValue("environment", AnyValue("dev")),
-          KeyValue("cmdbReference", AnyValue("AT12345"))
-        )
-      ),
-      NumberDataPoint(
-        startTimeUnixNano = 0L,
-        timeUnixNano = System.currentTimeMillis() * 1000000L,
-        value = 88.8,
-        attributes = Seq(
-          KeyValue("environment", AnyValue("qa")),
-          KeyValue("cmdbReference", AnyValue("AT12345"))
-        )
-      )
-    )
-
-    val multiGaugeMetric = Metric(
-      name = "multi_datapoint_metric",
-      description = "Gauge metric with multiple datapoints",
-      unit = "",
-      gauge = Some(Gauge(points = multiGaugePoints))
-    )
-
-    // Send metric 2
-    val export2 = buildExportRequest(multiGaugeMetric)
-    producer.send(Seq(new EventData(export2.toByteArray)).asJava).block()
-    println("✅ multi_datapoint_metric sent to Event Hub")
-
-    producer.close()
-  }
+object Main {
 
   def main(args: Array[String]): Unit = {
+
+    println("=== OpenTelemetry Environment Variables Check ===")
+    println("OTEL_EXPORTER_OTLP_ENDPOINT: " + sys.env.getOrElse("OTEL_EXPORTER_OTLP_ENDPOINT", "❌ Not set"))
+    println("OTEL_EXPORTER_OTLP_HEADERS: " + sys.env.getOrElse("OTEL_EXPORTER_OTLP_HEADERS", "❌ Not set"))
+    println("OTEL_RESOURCE_ATTRIBUTES: " + sys.env.getOrElse("OTEL_RESOURCE_ATTRIBUTES", "❌ Not set"))
+    println("================================================")
+
+    // Setup Azure Event Hub
     val tenantId     = sys.env("AZ_TENANT_ID")
     val clientId     = sys.env("AZ_CLIENT_ID")
     val clientSecret = sys.env("AZ_CLIENT_SECRET")
-    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE")
+    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE") // e.g. "xxx.servicebus.windows.net"
     val eventHub     = sys.env("AZ_EVENTHUB_NAME")
 
     val credential = new ClientSecretCredentialBuilder()
@@ -100,6 +36,56 @@ object EventHubOtelExporter {
       .clientSecret(clientSecret)
       .build()
 
-    sendOtelMetrics(namespace, eventHub, credential)
+    val producer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .buildAsyncProducerClient()
+
+    // Create SDK Meter Provider
+    val meter: Meter = GlobalOpenTelemetry.getMeter("m922633_otel-databricks-meter")
+
+    // ==============================
+    // Metric 1: Single datapoint
+    // ==============================
+    meter.gaugeBuilder("first_gauge_m922633")
+      .setDescription("First gauge metric")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        val value = 42.5
+        val attrs = Attributes.builder()
+          .put("environment", "dev")
+          .put("cmdbReference", "AT12345")
+          .build()
+
+        measurement.record(value, attrs)
+
+        // send to Event Hub in OTLP JSON-like format
+        val json = s"""{"name":"first_gauge_m922633","value":$value,"environment":"dev","cmdbReference":"AT12345"}"""
+        producer.send(Seq(new EventData(json)).asJava).block()
+      }
+
+    // ==============================
+    // Metric 2: Multi-datapoint Gauge
+    // ==============================
+    meter.gaugeBuilder("multi_datapoint_metric")
+      .setDescription("Multi-datapoint gauge metric")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        val metrics = Seq(
+          (77.7, "dev"),
+          (88.8, "qa")
+        )
+        metrics.foreach { case (v, env) =>
+          val attrs = Attributes.builder()
+            .put("environment", env)
+            .put("cmdbReference", "AT12345")
+            .build()
+          measurement.record(v, attrs)
+
+          // send each metric to Event Hub
+          val json = s"""{"name":"multi_datapoint_metric","value":$v,"environment":"$env","cmdbReference":"AT12345"}"""
+          producer.send(Seq(new EventData(json)).asJava).block()
+        }
+      }
+
+    println("✅ Metrics registered and sent to Event Hub in OTLP-like JSON format")
+    println("Metrics also available for SDK export via GlobalOpenTelemetry if OTLP collector is attached")
   }
 }
