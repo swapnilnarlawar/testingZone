@@ -226,3 +226,4 @@ object OTelEventHubBridge {
     println("🚀 Done. Metrics exported via OTLP and round-tripped through Event Hub")
   }
 }
+
