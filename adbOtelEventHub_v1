@@ -1,0 +1,99 @@
+import io.opentelemetry.api.GlobalOpenTelemetry
+import io.opentelemetry.api.common.Attributes
+import io.opentelemetry.api.metrics.{Meter, ObservableDoubleMeasurement}
+import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest
+import io.opentelemetry.sdk.metrics.SdkMeterProvider
+import com.azure.identity.ClientSecretCredentialBuilder
+import com.azure.messaging.eventhubs._
+import com.azure.messaging.eventhubs.{EventHubClientBuilder, EventData}
+import scala.jdk.CollectionConverters._
+
+object OtelEventHubAppMultiSend {
+
+  def main(args: Array[String]): Unit = {
+    // -------------------------------
+    // 1️⃣ Setup OTel Meter
+    // -------------------------------
+    val meter: Meter = GlobalOpenTelemetry.getMeter("dual-export-meter")
+
+    // Metric 1: Gauge
+    meter.gaugeBuilder("cpu_usage_percent")
+      .setDescription("CPU usage")
+      .buildWithCallback { measurement: ObservableDoubleMeasurement =>
+        measurement.record(42.5, Attributes.builder()
+          .put("environment", "dev")
+          .put("cmdbReference", "AT12345")
+          .build())
+      }
+
+    // Metric 2: Counter
+    val counter = meter.counterBuilder("records_processed_total")
+      .setDescription("Total records processed")
+      .ofLongs()
+      .build()
+
+    counter.add(
+      12345L,
+      Attributes.builder()
+        .put("environment", "qa")
+        .put("cmdbReference", "AT12345")
+        .build()
+    )
+
+    println("✅ Metrics registered locally in OTel SDK")
+
+    // -------------------------------
+    // 2️⃣ Setup Event Hub Producer
+    // -------------------------------
+    val tenantId     = sys.env("AZ_TENANT_ID")
+    val clientId     = sys.env("AZ_CLIENT_ID")
+    val clientSecret = sys.env("AZ_CLIENT_SECRET")
+    val namespace    = sys.env("AZ_EVENTHUB_NAMESPACE")
+    val eventHub     = sys.env("AZ_EVENTHUB_NAME")
+
+    val credential = new ClientSecretCredentialBuilder()
+      .tenantId(tenantId)
+      .clientId(clientId)
+      .clientSecret(clientSecret)
+      .build()
+
+    val producer = new EventHubClientBuilder()
+      .credential(namespace, eventHub, credential)
+      .buildAsyncProducerClient()
+
+    // -------------------------------
+    // 3️⃣ Collect metrics from OTel SDK
+    // -------------------------------
+    val sdkProvider = GlobalOpenTelemetry.getMeterProvider match {
+      case sdk: SdkMeterProvider => sdk
+      case _ => throw new RuntimeException("OTel MeterProvider is not SDK instance")
+    }
+
+    val resourceMetrics = sdkProvider.collectAllMetrics() // list of ResourceMetrics
+
+    // -------------------------------
+    // 4️⃣ Send one OTLP message per metric
+    // -------------------------------
+    resourceMetrics.asScala.foreach { rm =>
+      rm.getScopeMetricsList.asScala.foreach { sm =>
+        sm.getMetricsList.asScala.foreach { metric =>
+          val singleMetricRequest = ExportMetricsServiceRequest.newBuilder()
+            .addResourceMetrics(
+              rm.toBuilder.clearScopeMetrics().addScopeMetrics(sm).build()
+            )
+            .build()
+
+          val bytes = singleMetricRequest.toByteArray
+          val event = new EventData(bytes)
+
+          // Send to Event Hub
+          producer.send(Seq(event).asJava).block()
+          println(s"📤 Sent metric '${metric.getName}' to Event Hub in OTLP format")
+        }
+      }
+    }
+
+    producer.close()
+    println("✅ All metrics sent to Event Hub")
+  }
+}
