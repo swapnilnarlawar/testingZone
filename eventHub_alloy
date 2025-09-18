@@ -1,41 +1,67 @@
-otelcol.receiver.azuremonitor "eventhub" {
-  subscription_id = "<your-subscription-id>"
-
-  # No client_id / client_secret / tenant_id needed with UAMI!
-  resource_groups = ["<your-resource-group>"]
-  namespaces      = ["Microsoft.EventHub/namespaces"]
-
-  metrics = [
-    "IncomingMessages",
-    "OutgoingMessages",
-    "IncomingBytes",
-    "OutgoingBytes",
-    "ServerErrors",
-    "UserErrors",
-  ]
-
-  collection_interval = "1m"
+# ============================
+# Prometheus Azure Exporter
+# ============================
+prometheus.exporter.azure integrations_azure_exporter {
+  subscriptions  = ["<your-subscription-id>"]
+  resource_type  = "Microsoft.EventHub/namespaces"
+  metrics        = ["IncomingMessages", "OutgoingMessages", "IncomingBytes", "OutgoingBytes", "ServerErrors", "UserErrors"]
+  regions        = ["eastus"]   # optional, set your EventHub region
 }
 
-otelcol.processor.batch "default" {
-  timeout = "10s"
-  send_batch_size = 1000
+# ============================
+# Prometheus Scrape Job
+# ============================
+prometheus.scrape integrations_azure_exporter {
+  targets     = prometheus.exporter.azure.integrations_azure_exporter.targets
+  forward_to  = [exporter.otlphttp.mimir]
+  job_name    = "integrations/azure_exporter"
 }
 
-otelcol.exporter.otlphttp "mimir" {
-  endpoint = "https://<mimir-endpoint>/otlp/v1/metrics"
-
-  headers = {
-    "Authorization" = "Bearer <your-mimir-api-key>"
+# ============================
+# Attributes Processor (optional)
+# ============================
+processor attributes default {
+  action {
+    action = upsert
+    key    = cmdbReference
+    value  = "AT12345"
   }
 }
 
-otelcol.service "default" {
+# ============================
+# Batch Processor (optional)
+# ============================
+processor batch default {
+  timeout         = "10s"
+  send_batch_size = 1000
+}
+
+# ============================
+# OTLP HTTP Exporter (Mimir)
+# ============================
+exporter otlphttp mimir {
+  client {
+    endpoint = "https://<mimir-endpoint>/otlp/v1/metrics"
+
+    headers = {
+      X-Scope-OrgID = "234628-23492-13"
+    }
+
+    tls {
+      insecure_skip_verify = true
+    }
+  }
+}
+
+# ============================
+# Service Pipeline
+# ============================
+service default {
   pipelines {
     metrics = [
-      otelcol.receiver.azuremonitor.eventhub,
-      otelcol.processor.batch.default,
-      otelcol.exporter.otlphttp.mimir,
+      processor.attributes.default,
+      processor.batch.default,
+      exporter.otlphttp.mimir
     ]
   }
 }
