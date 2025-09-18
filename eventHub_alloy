@@ -1,0 +1,41 @@
+otelcol.receiver.azuremonitor "eventhub" {
+  subscription_id = "<your-subscription-id>"
+
+  # No client_id / client_secret / tenant_id needed with UAMI!
+  resource_groups = ["<your-resource-group>"]
+  namespaces      = ["Microsoft.EventHub/namespaces"]
+
+  metrics = [
+    "IncomingMessages",
+    "OutgoingMessages",
+    "IncomingBytes",
+    "OutgoingBytes",
+    "ServerErrors",
+    "UserErrors",
+  ]
+
+  collection_interval = "1m"
+}
+
+otelcol.processor.batch "default" {
+  timeout = "10s"
+  send_batch_size = 1000
+}
+
+otelcol.exporter.otlphttp "mimir" {
+  endpoint = "https://<mimir-endpoint>/otlp/v1/metrics"
+
+  headers = {
+    "Authorization" = "Bearer <your-mimir-api-key>"
+  }
+}
+
+otelcol.service "default" {
+  pipelines {
+    metrics = [
+      otelcol.receiver.azuremonitor.eventhub,
+      otelcol.processor.batch.default,
+      otelcol.exporter.otlphttp.mimir,
+    ]
+  }
+}
