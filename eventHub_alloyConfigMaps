@@ -1,0 +1,208 @@
+# Environment Variables Configuration
+# Create a ConfigMap or set these in your deployment
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-eventhub-config
+  namespace: monitoring
+data:
+  # Azure Configuration
+  AZURE_SUBSCRIPTION_ID: "your-subscription-id"
+  EVENTHUB_RESOURCE_GROUP: "your-resource-group"
+  EVENTHUB_NAMESPACE: "your-eventhub-namespace"  # Just the name, not the full URL
+  EVENTHUB_NAME: "your-eventhub-name"
+  
+  # Optional: UAMI Client ID if you have multiple managed identities
+  # UAMI_CLIENT_ID: "your-uami-client-id"
+  
+  # Multi-tenant Configuration (from your existing setup)
+  X_SCOPE_ORG_ID: "your-org-id"
+  TENANT_ID: "your-tenant-id"
+  CMDB_REFERENCE: "your-cmdb-reference"
+  AKS_ID: "your-aks-cluster-id"
+  
+  # Endpoints (from your existing setup)
+  OTELCOL_URL: "https://otelcol.test.net"
+  
+  # Environment
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "info"
+
+---
+# Secret for sensitive data (if using Grafana Cloud)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alloy-eventhub-secret
+  namespace: monitoring
+type: Opaque
+stringData:
+  # Only needed if using Grafana Cloud
+  GRAFANA_CLOUD_USERNAME: "your-grafana-cloud-username"
+  GRAFANA_CLOUD_API_KEY: "your-grafana-cloud-api-key"
+
+---
+# ServiceAccount with proper annotations for UAMI
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy-eventhub
+  namespace: monitoring
+  annotations:
+    azure.workload.identity/client-id: "your-uami-client-id"
+    azure.workload.identity/use: "true"
+
+---
+# Deployment configuration
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana-alloy-eventhub
+  namespace: monitoring
+  labels:
+    app: grafana-alloy-eventhub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana-alloy-eventhub
+  template:
+    metadata:
+      labels:
+        app: grafana-alloy-eventhub
+        azure.workload.identity/use: "true"  # Enable workload identity
+    spec:
+      serviceAccountName: alloy-eventhub
+      containers:
+      - name: alloy
+        image: grafana/alloy:latest
+        args:
+          - run
+          - --config.file=/etc/alloy/config.alloy
+          - --server.http.listen-addr=0.0.0.0:12345
+          - --storage.path=/tmp/alloy
+        ports:
+        - containerPort: 12345
+          name: http
+        envFrom:
+        - configMapRef:
+            name: alloy-eventhub-config
+        - secretRef:
+            name: alloy-eventhub-secret
+            optional: true
+        env:
+        # Additional environment variables for Azure authentication
+        - name: AZURE_CLIENT_ID
+          value: "your-uami-client-id"  # Your User-Assigned Managed Identity client ID
+        - name: AZURE_AUTHORITY_HOST
+          value: "https://login.microsoftonline.com/"
+        - name: AZURE_FEDERATED_TOKEN_FILE
+          value: "/var/run/secrets/azure/tokens/azure-identity-token"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/alloy
+        - name: azure-identity-token
+          mountPath: /var/run/secrets/azure/tokens
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 12345
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 12345
+          initialDelaySeconds: 15
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: alloy-config-file
+      - name: azure-identity-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: azure-identity-token
+              audience: api://AzureADTokenExchange
+
+---
+# ConfigMap for the Alloy configuration file
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config-file
+  namespace: monitoring
+data:
+  config.alloy: |
+    # Your Alloy configuration goes here
+    # Copy the content from the main configuration artifact
+
+---
+# Service to expose Alloy metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-alloy-eventhub
+  namespace: monitoring
+  labels:
+    app: grafana-alloy-eventhub
+spec:
+  ports:
+  - port: 12345
+    targetPort: 12345
+    name: http
+  selector:
+    app: grafana-alloy-eventhub
+
+---
+# ServiceMonitor for Prometheus to scrape Alloy metrics (if using Prometheus Operator)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: grafana-alloy-eventhub
+  namespace: monitoring
+  labels:
+    app: grafana-alloy-eventhub
+spec:
+  selector:
+    matchLabels:
+      app: grafana-alloy-eventhub
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+
+---
+# RBAC Configuration (if needed for cluster resources)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy-eventhub-reader
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy-eventhub-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alloy-eventhub-reader
+subjects:
+- kind: ServiceAccount
+  name: alloy-eventhub
+  namespace: monitoring
