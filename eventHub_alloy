@@ -1,3 +1,8 @@
+# Grafana Alloy configuration for Azure Event Hub metrics
+# Combining Azure Monitor metrics + Custom Event Hub consumer
+# Using User-Assigned Managed Identity (UAMI) authentication
+# Save this as config.alloy
+
 // Option 1: Azure Monitor exporter for Event Hub built-in metrics
 prometheus.exporter.azure "eventhub_monitor" {
   // Using UAMI - no credentials needed when running in Azure with managed identity
@@ -138,7 +143,7 @@ prometheus.exporter.azure "eventhub_monitor" {
   scrape_interval = "60s"
 }
 
-// Scrape Azure Monitor metrics
+// Scrape Azure Monitor metrics and send to your pipeline
 prometheus.scrape "eventhub_azure_monitor" {
   targets = prometheus.exporter.azure.eventhub_monitor.targets
   forward_to = [prometheus.relabel.eventhub_monitor_labels.receiver]
@@ -151,7 +156,7 @@ prometheus.scrape "eventhub_azure_monitor" {
 
 // Add custom labels to Azure Monitor metrics
 prometheus.relabel "eventhub_monitor_labels" {
-  forward_to = [prometheus.remote_write.default.receiver]
+  forward_to = [prometheus.remote_write.mimir.receiver]
   
   rule {
     source_labels = ["__meta_azure_resource_group"]
@@ -173,6 +178,27 @@ prometheus.relabel "eventhub_monitor_labels" {
     regex = "azure_(.+)"
     target_label = "metric_source"
     replacement = "azure_monitor"
+  }
+  
+  // Add your organizational labels
+  rule {
+    target_label = "enrichedBy"
+    replacement = "centralAlloy"
+  }
+  
+  rule {
+    target_label = "cmdbReference"
+    replacement = env("CMDB_REFERENCE")
+  }
+  
+  rule {
+    target_label = "cluster"
+    replacement = env("AKS_ID")
+  }
+  
+  rule {
+    target_label = "tenant"
+    replacement = env("TENANT_ID")
   }
 }
 
@@ -200,6 +226,33 @@ otelcol.receiver.azureeventhub "custom_metrics" {
     logs = [otelcol.processor.transform.eventhub_logs.input]
     metrics = [otelcol.processor.transform.eventhub_metrics.input]
     traces = [otelcol.processor.transform.eventhub_traces.input]
+  }
+}
+
+// Option 2: OpenTelemetry Event Hub receiver for custom application metrics
+otelcol.receiver.azureeventhub "custom_metrics" {
+  // UAMI authentication - specify the namespace endpoint
+  endpoint = env("EVENTHUB_NAMESPACE") + ".servicebus.windows.net"
+  eventhub_name = env("EVENTHUB_NAME")
+  consumer_group = "$Default"
+  
+  // Use User-Assigned Managed Identity
+  auth {
+    managed_identity {
+      client_id = env("UAMI_CLIENT_ID")  // Optional: specify UAMI client ID if multiple identities
+    }
+  }
+  
+  // Partition configuration
+  partition {
+    checkpoint_interval = "10s"
+    receive_timeout = "60s"
+  }
+  
+  output {
+    logs    = [otelcol.processor.batch.default.input]
+    metrics = [otelcol.processor.batch.default.input] 
+    traces  = [otelcol.processor.batch.default.input]
   }
 }
 
@@ -248,7 +301,7 @@ otelcol.processor.transform "eventhub_metrics" {
   }
   
   output {
-    metrics = [otelcol.processor.batch.eventhub_metrics.input]
+    metrics = [otelcol.processor.batch.default.input]
   }
 }
 
@@ -265,7 +318,7 @@ otelcol.processor.transform "eventhub_traces" {
   }
   
   output {
-    traces = [otelcol.exporter.debug.eventhub_debug.input]
+    traces = [otelcol.processor.batch.default.input]
   }
 }
 
@@ -273,112 +326,181 @@ otelcol.processor.transform "eventhub_traces" {
 otelcol.connector.logs "custom_metrics" {
   // Convert log events to metrics based on attributes
   output {
-    metrics = [otelcol.processor.batch.eventhub_metrics.input]
+    metrics = [otelcol.processor.batch.default.input]
   }
 }
 
-// Batch processing for better performance
-otelcol.processor.batch "eventhub_metrics" {
-  send_batch_size = 1000
-  timeout = "30s"
-  send_batch_max_size = 1500
-  
-  output {
-    metrics = [otelcol.exporter.prometheus.eventhub_custom.input]
-  }
-}
-
-// Export custom metrics to Prometheus
-otelcol.exporter.prometheus "eventhub_custom" {
-  forward_to = [prometheus.relabel.eventhub_custom_labels.receiver]
-  add_metric_suffixes = false
-  
-  resource_to_telemetry_conversion {
-    enabled = true
-  }
-  
-  // Namespace for custom metrics
-  namespace = "eventhub_custom"
-}
-
-// Add labels to custom metrics
-prometheus.relabel "eventhub_custom_labels" {
-  forward_to = [prometheus.remote_write.default.receiver]
-  
-  rule {
-    source_labels = ["__name__"]
-    regex = "eventhub_custom_(.+)"
-    target_label = "metric_source"
-    replacement = "eventhub_consumer"
-  }
-  
-  rule {
-    source_labels = ["eventhub_namespace"]
-    regex = "(.+)"
-    target_label = "namespace"
-    replacement = "${1}"
-  }
-  
-  rule {
-    source_labels = ["eventhub_name"] 
-    regex = "(.+)"
-    target_label = "eventhub"
-    replacement = "${1}"
-  }
-}
-
-// Debug exporter for troubleshooting (optional)
-otelcol.exporter.debug "eventhub_debug" {
-  verbosity = "basic"
-  sampling_initial = 2
-  sampling_thereafter = 500
-}
-
-// Health check endpoint
+// Health check endpoint - send to Mimir as well
 prometheus.exporter.self "alloy_health" {
 }
 
 prometheus.scrape "alloy_health" {
   targets = prometheus.exporter.self.alloy_health.targets
-  forward_to = [prometheus.remote_write.default.receiver]
+  forward_to = [prometheus.remote_write.mimir.receiver]
   job_name = "alloy-health"
   scrape_interval = "30s"
 }
 
-// Remote write configuration
-prometheus.remote_write "default" {
-  endpoint {
-    url = env("PROMETHEUS_REMOTE_WRITE_URL")
+// Authentication for multi-tenant setup
+otelcol.auth.headers "creds" {
+  header {
+    key   = "X-Scope-OrgID"
+    value = env("X_SCOPE_ORG_ID")
+  }
+}
+
+// Batch processor for better performance
+otelcol.processor.batch "default" {
+  metadata_keys      = ["X-Scope-OrgID"]
+  timeout           = "10s"
+  send_batch_size   = 1000
+  
+  output {
+    traces  = [otelcol.processor.attributes.enrich_alloy_labels.input]
+    metrics = [otelcol.processor.attributes.enrich_alloy_labels.input]
+    logs    = [otelcol.processor.attributes.enrich_alloy_labels.input]
+  }
+}
+
+// Enrich with standardized labels for your organization
+otelcol.processor.attributes "enrich_alloy_labels" {
+  action {
+    action = "insert"
+    key    = "enrichedBy"
+    value  = "centralAlloy"
+  }
+  
+  action {
+    action = "insert"
+    key    = "cmdbReference"
+    value  = env("CMDB_REFERENCE")
+  }
+  
+  action {
+    action = "insert"
+    key    = "cluster"
+    value  = env("AKS_ID")
+  }
+  
+  action {
+    action = "insert"
+    key    = "data_source"
+    value  = "azure_eventhub"
+  }
+  
+  action {
+    action = "insert"
+    key    = "tenant"
+    value  = env("TENANT_ID")
+  }
+  
+  output {
+    metrics = [otelcol.processor.transform.convert_resources.input]
+    logs    = [otelcol.processor.transform.convert_resources.input]
+    traces  = [otelcol.processor.transform.convert_resources.input]
+  }
+}
+
+// Convert resource attributes to datapoint/log attributes
+otelcol.processor.transform "convert_resources" {
+  error_mode = "ignore"
+  
+  metric_statements {
+    context = "datapoint"
+    statements = [
+      `merge_maps(attributes, resource.attributes, "insert")`,
+    ]
+  }
+  
+  log_statements {
+    context = "log"
+    statements = [
+      `merge_maps(attributes, resource.attributes, "insert")`,
+    ]
+  }
+  
+  output {
+    metrics = [otelcol.exporter.otlphttp.otelcol.input]
+    logs    = [otelcol.exporter.otlphttp.otelcol.input]
+    traces  = [otelcol.exporter.otlphttp.otelcol.input]
+  }
+}
+
+// Primary OTLP exporter to your central collector
+otelcol.exporter.otlphttp "otelcol" {
+  client {
+    endpoint = env("OTELCOL_URL")
+    auth     = otelcol.auth.headers.creds.handler
     
-    // For Grafana Cloud, add authentication
-    // basic_auth {
-    //   username = env("GRAFANA_CLOUD_USERNAME")
-    //   password = env("GRAFANA_CLOUD_API_KEY") 
-    // }
-    
-    // Custom headers
+    tls {
+      insecure             = true
+      insecure_skip_verify = true
+    }
+  }
+}
+
+// Secondary OTLP exporter (backup/additional endpoint)
+otelcol.exporter.otlphttp "default" {
+  client {
+    endpoint = "https://otelcol.test.net"
     headers = {
-      "X-Source" = "grafana-alloy-eventhub",
+      "X-Scope-OrgID" = env("TENANT_ID")
+    }
+    
+    tls {
+      insecure_skip_verify = true
+    }
+  }
+}
+
+// Remote write to Mimir for Prometheus metrics
+prometheus.remote_write "mimir" {
+  endpoint {
+    url = "https://mimir.test.net/api/v1/push"
+    
+    headers = {
+      "X-Scope-OrgID" = env("X_SCOPE_ORG_ID")
+      "X-Source"      = "grafana-alloy-eventhub"
       "X-Environment" = env("ENVIRONMENT")
+    }
+    
+    tls_config {
+      insecure_skip_verify = true
     }
     
     // Queue configuration for high throughput
     queue_config {
-      capacity = 20000
-      max_shards = 100
-      batch_send_deadline = "5s"
-      max_samples_per_send = 2000
+      capacity                = 20000
+      max_shards             = 100
+      batch_send_deadline    = "5s"
+      max_samples_per_send   = 2000
     }
     
     // Retry configuration
     retry_on_http_429 = true
     
-    // Write relabeling (optional)
+    // Write relabeling to add organizational metadata
     write_relabel_configs = [
       {
         source_labels = ["__name__"]
-        regex = "up|scrape_.*"
-        action = "drop"
+        regex         = "up|scrape_.*"
+        action        = "drop"
+      },
+      {
+        target_label = "enrichedBy"
+        replacement  = "centralAlloy"
+      },
+      {
+        target_label = "cmdbReference"
+        replacement  = env("CMDB_REFERENCE")
+      },
+      {
+        target_label = "cluster"
+        replacement  = env("AKS_ID")
+      },
+      {
+        target_label = "tenant"
+        replacement  = env("TENANT_ID")
       }
     ]
   }
