@@ -511,3 +511,272 @@ logging {
   level = env("LOG_LEVEL")
   format = "json"
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Option 2: Use loki.source.azure_event_hubs for consuming Event Hub messages
+loki.source.azure_event_hubs "eventhub_consumer" {
+  // UAMI authentication
+  fully_qualified_namespace = env("EVENTHUB_NAMESPACE") + ".servicebus.windows.net"
+  eventhub_name = env("EVENTHUB_NAME")
+  consumer_group = "$Default"
+  
+  // Use managed identity (no connection string needed)
+  use_managed_identity_authentication = true
+  
+  forward_to = [loki.process.eventhub_processor.receiver]
+}
+
+// Process Event Hub messages and extract metrics
+loki.process "eventhub_processor" {
+  forward_to = [loki.write.eventhub_logs.receiver]
+  
+  stage.json {
+    expressions = {
+      event_type = "eventType",
+      source_system = "source",
+      application = "application",
+      severity = "severity",
+      custom_value = "value",
+    }
+  }
+  
+  stage.labels {
+    values = {
+      event_type = "",
+      source_system = "",
+      application = "",
+      severity = "",
+      eventhub_namespace = env("EVENTHUB_NAMESPACE"),
+      eventhub_name = env("EVENTHUB_NAME"),
+      enrichedBy = "centralAlloy",
+      cmdbReference = env("CMDB_REFERENCE"),
+      cluster = env("AKS_ID"),
+      tenant = env("TENANT_ID"),
+    }
+  }
+  
+  stage.metrics {
+    metric.counter {
+      name = "eventhub_messages_total"
+      description = "Total messages received from Event Hub"
+    }
+    
+    metric.histogram {
+      name = "eventhub_message_size_bytes"
+      description = "Size of messages from Event Hub"
+      buckets = [100, 500, 1000, 5000, 10000, 50000, 100000]
+    }
+  }
+}
+
+// Send logs to OTEL collector
+loki.write "eventhub_logs" {
+  endpoint {
+    url = env("OTELCOL_URL") + "/loki/api/v1/push"
+    headers = {
+      "X-Scope-OrgID" = env("X_SCOPE_ORG_ID"),
+    }
+    
+    tls_config {
+      insecure_skip_verify = true
+    }
+  }
+}
+
+// Authentication for multi-tenant setup
+otelcol.auth.headers "creds" {
+  header {
+    key   = "X-Scope-OrgID"
+    value = env("X_SCOPE_ORG_ID")
+  }
+}
+
+// Batch processor for better performance
+otelcol.processor.batch "default" {
+  metadata_keys      = ["X-Scope-OrgID"]
+  timeout           = "10s"
+  send_batch_size   = 1000
+  
+  output {
+    traces  = [otelcol.processor.attributes.enrich_alloy_labels.input]
+    metrics = [otelcol.processor.attributes.enrich_alloy_labels.input]
+    logs    = [otelcol.processor.attributes.enrich_alloy_labels.input]
+  }
+}
+
+// Enrich with standardized labels for your organization
+otelcol.processor.attributes "enrich_alloy_labels" {
+  action {
+    action = "insert"
+    key    = "enrichedBy"
+    value  = "centralAlloy"
+  }
+  
+  action {
+    action = "insert"
+    key    = "cmdbReference"
+    value  = env("CMDB_REFERENCE")
+  }
+  
+  action {
+    action = "insert"
+    key    = "cluster"
+    value  = env("AKS_ID")
+  }
+  
+  action {
+    action = "insert"
+    key    = "data_source"
+    value  = "azure_eventhub"
+  }
+  
+  action {
+    action = "insert"
+    key    = "tenant"
+    value  = env("TENANT_ID")
+  }
+  
+  output {
+    metrics = [otelcol.processor.transform.convert_resources.input]
+    logs    = [otelcol.processor.transform.convert_resources.input]
+    traces  = [otelcol.processor.transform.convert_resources.input]
+  }
+}
+
+// Convert resource attributes to datapoint/log attributes
+otelcol.processor.transform "convert_resources" {
+  error_mode = "ignore"
+  
+  metric_statements {
+    context = "datapoint"
+    statements = [
+      `merge_maps(attributes, resource.attributes, "insert")`,
+    ]
+  }
+  
+  log_statements {
+    context = "log"
+    statements = [
+      `merge_maps(attributes, resource.attributes, "insert")`,
+    ]
+  }
+  
+  output {
+    metrics = [otelcol.exporter.otlphttp.otelcol.input]
+    logs    = [otelcol.exporter.otlphttp.otelcol.input]
+    traces  = [otelcol.exporter.otlphttp.otelcol.input]
+  }
+}
+
+// Primary OTLP exporter to your central collector
+otelcol.exporter.otlphttp "otelcol" {
+  client {
+    endpoint = env("OTELCOL_URL")
+    auth     = otelcol.auth.headers.creds.handler
+    
+    tls {
+      insecure             = true
+      insecure_skip_verify = true
+    }
+  }
+}
+
+// Secondary OTLP exporter (backup/additional endpoint)
+otelcol.exporter.otlphttp "default" {
+  client {
+    endpoint = "https://otelcol.test.net"
+    headers = {
+      "X-Scope-OrgID" = env("TENANT_ID"),
+    }
+    
+    tls {
+      insecure_skip_verify = true
+    }
+  }
+}
+
+// Remote write to Mimir for Prometheus metrics
+prometheus.remote_write "mimir" {
+  endpoint {
+    url = "https://mimir.test.net/api/v1/push"
+    
+    headers = {
+      "X-Scope-OrgID" = env("X_SCOPE_ORG_ID"),
+      "X-Source"      = "grafana-alloy-eventhub",
+      "X-Environment" = env("ENVIRONMENT"),
+    }
+    
+    tls_config {
+      insecure_skip_verify = true
+    }
+    
+    // Queue configuration for high throughput
+    queue_config {
+      capacity                = 20000
+      max_shards             = 100
+      batch_send_deadline    = "5s"
+      max_samples_per_send   = 2000
+    }
+    
+    // Retry configuration
+    retry_on_http_429 = true
+    
+    // Write relabeling to add organizational metadata
+    write_relabel_configs = [
+      {
+        source_labels = ["__name__"]
+        regex         = "up|scrape_.*"
+        action        = "drop"
+      },
+      {
+        target_label = "enrichedBy"
+        replacement  = "centralAlloy"
+      },
+      {
+        target_label = "cmdbReference"
+        replacement  = env("CMDB_REFERENCE")
+      },
+      {
+        target_label = "cluster"
+        replacement  = env("AKS_ID")
+      },
+      {
+        target_label = "tenant"
+        replacement  = env("TENANT_ID")
+      },
+    ]
+  }
+}
+
+// Health check endpoint - send to Mimir as well
+prometheus.exporter.self "alloy_health" {
+}
+
+prometheus.scrape "alloy_health" {
+  targets = prometheus.exporter.self.alloy_health.targets
+  forward_to = [prometheus.remote_write.mimir.receiver]
+  job_name = "alloy-health"
+  scrape_interval = "30s"
+}
+
+// Logging configuration  
+logging {
+  level = env("LOG_LEVEL")
+  format = "json"
+}
