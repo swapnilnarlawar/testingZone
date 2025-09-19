@@ -1,67 +1,391 @@
-# ============================
-# Prometheus Azure Exporter
-# ============================
-prometheus.exporter.azure integrations_azure_exporter {
-  subscriptions  = ["<your-subscription-id>"]
-  resource_type  = "Microsoft.EventHub/namespaces"
-  metrics        = ["IncomingMessages", "OutgoingMessages", "IncomingBytes", "OutgoingBytes", "ServerErrors", "UserErrors"]
-  regions        = ["eastus"]   # optional, set your EventHub region
+// Option 1: Azure Monitor exporter for Event Hub built-in metrics
+prometheus.exporter.azure "eventhub_monitor" {
+  // Using UAMI - no credentials needed when running in Azure with managed identity
+  subscription_id = env("AZURE_SUBSCRIPTION_ID")
+  
+  // Optionally specify resource groups to limit scope
+  resource_groups = [env("EVENTHUB_RESOURCE_GROUP")]
+  
+  // Focus on Event Hub resources
+  resource_types = [
+    "Microsoft.EventHub/namespaces"
+  ]
+  
+  // Event Hub specific metrics from Azure Monitor
+  metrics = [
+    {
+      name = "IncomingMessages"
+      aggregations = ["Total", "Average"]
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "OutgoingMessages" 
+      aggregations = ["Total", "Average"]
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "IncomingBytes"
+      aggregations = ["Total", "Average"] 
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "OutgoingBytes"
+      aggregations = ["Total", "Average"]
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "ActiveConnections"
+      aggregations = ["Average", "Maximum"]
+      dimensions = ["*"]
+    },
+    {
+      name = "ConnectionsOpened"
+      aggregations = ["Total"]
+      dimensions = ["*"]
+    },
+    {
+      name = "ConnectionsClosed" 
+      aggregations = ["Total"]
+      dimensions = ["*"]
+    },
+    {
+      name = "CaptureBacklog"
+      aggregations = ["Average"]
+      dimensions = ["PartitionId", "EntityName"]
+    },
+    {
+      name = "ArchiveBacklog"
+      aggregations = ["Average"] 
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "Size"
+      aggregations = ["Average"]
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "INREQS"
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"]
+    },
+    {
+      name = "SUCCREQ"
+      aggregations = ["Total"] 
+      dimensions = ["EntityName", "OperationResult"]
+    },
+    {
+      name = "FAILREQ"
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"] 
+    },
+    {
+      name = "SVRBSY"
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"]
+    },
+    {
+      name = "INTERR" 
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"]
+    },
+    {
+      name = "MISCERR"
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"]
+    },
+    {
+      name = "INMSGS"
+      aggregations = ["Total"]
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "EHINMSGS"
+      aggregations = ["Total"] 
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "OUTMSGS"
+      aggregations = ["Total"]
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "EHOUTMSGS"
+      aggregations = ["Total"]
+      dimensions = ["EntityName"]
+    },
+    {
+      name = "UserErrors"
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"]
+    },
+    {
+      name = "ServerErrors"
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"]
+    },
+    {
+      name = "QuotaExceededErrors"
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"]
+    },
+    {
+      name = "ThrottledRequests"
+      aggregations = ["Total"]
+      dimensions = ["EntityName", "OperationResult"]
+    }
+  ]
+  
+  scrape_interval = "60s"
 }
 
-# ============================
-# Prometheus Scrape Job
-# ============================
-prometheus.scrape integrations_azure_exporter {
-  targets     = prometheus.exporter.azure.integrations_azure_exporter.targets
-  forward_to  = [exporter.otlphttp.mimir]
-  job_name    = "integrations/azure_exporter"
+// Scrape Azure Monitor metrics
+prometheus.scrape "eventhub_azure_monitor" {
+  targets = prometheus.exporter.azure.eventhub_monitor.targets
+  forward_to = [prometheus.relabel.eventhub_monitor_labels.receiver]
+  scrape_interval = "60s"
+  job_name = "azure-eventhub-monitor"
+  
+  // Increase timeout for Azure Monitor API calls
+  scrape_timeout = "50s"
 }
 
-# ============================
-# Attributes Processor (optional)
-# ============================
-processor attributes default {
-  action {
-    action = upsert
-    key    = cmdbReference
-    value  = "AT12345"
+// Add custom labels to Azure Monitor metrics
+prometheus.relabel "eventhub_monitor_labels" {
+  forward_to = [prometheus.remote_write.default.receiver]
+  
+  rule {
+    source_labels = ["__meta_azure_resource_group"]
+    target_label = "resource_group"
+  }
+  
+  rule {
+    source_labels = ["__meta_azure_resource_name"] 
+    target_label = "eventhub_namespace"
+  }
+  
+  rule {
+    source_labels = ["__meta_azure_location"]
+    target_label = "azure_region"
+  }
+  
+  rule {
+    source_labels = ["__name__"]
+    regex = "azure_(.+)"
+    target_label = "metric_source"
+    replacement = "azure_monitor"
   }
 }
 
-# ============================
-# Batch Processor (optional)
-# ============================
-processor batch default {
-  timeout         = "10s"
-  send_batch_size = 1000
-}
-
-# ============================
-# OTLP HTTP Exporter (Mimir)
-# ============================
-exporter otlphttp mimir {
-  client {
-    endpoint = "https://<mimir-endpoint>/otlp/v1/metrics"
-
-    headers = {
-      X-Scope-OrgID = "234628-23492-13"
+// Option 2: OpenTelemetry Event Hub receiver for custom application metrics
+otelcol.receiver.azureeventhub "custom_metrics" {
+  // UAMI authentication - specify the namespace endpoint
+  endpoint = env("EVENTHUB_NAMESPACE") + ".servicebus.windows.net"
+  eventhub_name = env("EVENTHUB_NAME")
+  consumer_group = "$Default"
+  
+  // Use User-Assigned Managed Identity
+  auth {
+    managed_identity {
+      client_id = env("UAMI_CLIENT_ID")  // Optional: specify UAMI client ID if multiple identities
     }
-
-    tls {
-      insecure_skip_verify = true
-    }
+  }
+  
+  // Partition configuration
+  partition {
+    checkpoint_interval = "10s"
+    receive_timeout = "60s"
+  }
+  
+  output {
+    logs = [otelcol.processor.transform.eventhub_logs.input]
+    metrics = [otelcol.processor.transform.eventhub_metrics.input]
+    traces = [otelcol.processor.transform.eventhub_traces.input]
   }
 }
 
-# ============================
-# Service Pipeline
-# ============================
-service default {
-  pipelines {
-    metrics = [
-      processor.attributes.default,
-      processor.batch.default,
-      exporter.otlphttp.mimir
+// Transform Event Hub log messages into custom metrics
+otelcol.processor.transform "eventhub_logs" {
+  error_mode = "ignore"
+  
+  log_statements {
+    context = "log"
+    statements = [
+      // Parse JSON messages and extract custom metrics
+      "set(attributes[\"event_type\"], ParseJSON(body)[\"eventType\"]) where IsString(body)",
+      "set(attributes[\"source_system\"], ParseJSON(body)[\"source\"]) where IsString(body)",
+      "set(attributes[\"application\"], ParseJSON(body)[\"application\"]) where IsString(body)",
+      "set(attributes[\"severity\"], ParseJSON(body)[\"severity\"]) where IsString(body)",
+      "set(attributes[\"custom_value\"], ParseJSON(body)[\"value\"]) where IsString(body)",
+      "set(attributes[\"partition_id\"], resource.attributes[\"partition.id\"])",
+      "set(attributes[\"eventhub_name\"], resource.attributes[\"eventhub.name\"])",
+      "set(attributes[\"eventhub_namespace\"], resource.attributes[\"eventhub.namespace\"])",
+      
+      // Create metrics from log content
+      "set(attributes[\"message_count\"], 1)",
+      "set(attributes[\"message_size\"], len(body)) where IsString(body)",
     ]
   }
+  
+  output {
+    logs = [otelcol.connector.logs.custom_metrics.input]
+  }
+}
+
+// Transform existing metrics from Event Hub
+otelcol.processor.transform "eventhub_metrics" {
+  error_mode = "ignore"
+  
+  metric_statements {
+    context = "metric" 
+    statements = [
+      // Add custom labels to metrics
+      "set(attributes[\"eventhub_namespace\"], resource.attributes[\"eventhub.namespace\"])",
+      "set(attributes[\"eventhub_name\"], resource.attributes[\"eventhub.name\"])",
+      "set(attributes[\"consumer_group\"], resource.attributes[\"eventhub.consumer_group\"])",
+      "set(attributes[\"partition_id\"], resource.attributes[\"partition.id\"])",
+      "set(attributes[\"metric_source\"], \"eventhub_consumer\")",
+    ]
+  }
+  
+  output {
+    metrics = [otelcol.processor.batch.eventhub_metrics.input]
+  }
+}
+
+// Handle traces if any
+otelcol.processor.transform "eventhub_traces" {
+  error_mode = "ignore"
+  
+  trace_statements {
+    context = "span"
+    statements = [
+      "set(attributes[\"eventhub_namespace\"], resource.attributes[\"eventhub.namespace\"])",
+      "set(attributes[\"eventhub_name\"], resource.attributes[\"eventhub.name\"])",
+    ]
+  }
+  
+  output {
+    traces = [otelcol.exporter.debug.eventhub_debug.input]
+  }
+}
+
+// Convert logs to custom metrics
+otelcol.connector.logs "custom_metrics" {
+  // Convert log events to metrics based on attributes
+  output {
+    metrics = [otelcol.processor.batch.eventhub_metrics.input]
+  }
+}
+
+// Batch processing for better performance
+otelcol.processor.batch "eventhub_metrics" {
+  send_batch_size = 1000
+  timeout = "30s"
+  send_batch_max_size = 1500
+  
+  output {
+    metrics = [otelcol.exporter.prometheus.eventhub_custom.input]
+  }
+}
+
+// Export custom metrics to Prometheus
+otelcol.exporter.prometheus "eventhub_custom" {
+  forward_to = [prometheus.relabel.eventhub_custom_labels.receiver]
+  add_metric_suffixes = false
+  
+  resource_to_telemetry_conversion {
+    enabled = true
+  }
+  
+  // Namespace for custom metrics
+  namespace = "eventhub_custom"
+}
+
+// Add labels to custom metrics
+prometheus.relabel "eventhub_custom_labels" {
+  forward_to = [prometheus.remote_write.default.receiver]
+  
+  rule {
+    source_labels = ["__name__"]
+    regex = "eventhub_custom_(.+)"
+    target_label = "metric_source"
+    replacement = "eventhub_consumer"
+  }
+  
+  rule {
+    source_labels = ["eventhub_namespace"]
+    regex = "(.+)"
+    target_label = "namespace"
+    replacement = "${1}"
+  }
+  
+  rule {
+    source_labels = ["eventhub_name"] 
+    regex = "(.+)"
+    target_label = "eventhub"
+    replacement = "${1}"
+  }
+}
+
+// Debug exporter for troubleshooting (optional)
+otelcol.exporter.debug "eventhub_debug" {
+  verbosity = "basic"
+  sampling_initial = 2
+  sampling_thereafter = 500
+}
+
+// Health check endpoint
+prometheus.exporter.self "alloy_health" {
+}
+
+prometheus.scrape "alloy_health" {
+  targets = prometheus.exporter.self.alloy_health.targets
+  forward_to = [prometheus.remote_write.default.receiver]
+  job_name = "alloy-health"
+  scrape_interval = "30s"
+}
+
+// Remote write configuration
+prometheus.remote_write "default" {
+  endpoint {
+    url = env("PROMETHEUS_REMOTE_WRITE_URL")
+    
+    // For Grafana Cloud, add authentication
+    // basic_auth {
+    //   username = env("GRAFANA_CLOUD_USERNAME")
+    //   password = env("GRAFANA_CLOUD_API_KEY") 
+    // }
+    
+    // Custom headers
+    headers = {
+      "X-Source" = "grafana-alloy-eventhub",
+      "X-Environment" = env("ENVIRONMENT")
+    }
+    
+    // Queue configuration for high throughput
+    queue_config {
+      capacity = 20000
+      max_shards = 100
+      batch_send_deadline = "5s"
+      max_samples_per_send = 2000
+    }
+    
+    // Retry configuration
+    retry_on_http_429 = true
+    
+    // Write relabeling (optional)
+    write_relabel_configs = [
+      {
+        source_labels = ["__name__"]
+        regex = "up|scrape_.*"
+        action = "drop"
+      }
+    ]
+  }
+}
+
+// Logging configuration  
+logging {
+  level = env("LOG_LEVEL")
+  format = "json"
 }
