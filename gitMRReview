@@ -4,14 +4,31 @@ import re
 import urllib3
 import xlsxwriter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 # ------------------- CONFIG -------------------
 GITLAB_URL = "https://gitlab.example.com"
 GITLAB_TOKEN = "YOUR_TOKEN"
-GROUP_NAME = "your-group-name"
-OUTPUT_FILE = "merge_requests_report.xlsx"
+
+# Prefer GROUP_ID (numeric) for stability
+GROUP_ID = 12345  
+GROUP_NAME = None  # optional fallback if ID is not known
+
+USE_TIMESTAMP = True  # Set True to append timestamp to output file
+
+# Base filename
+BASE_FILENAME = "merge_requests_report.xlsx"
+
+# Generate final output filename
+if USE_TIMESTAMP:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    OUTPUT_FILE = f"merge_requests_report_{timestamp}.xlsx"
+else:
+    OUTPUT_FILE = BASE_FILENAME
+
 MAX_WORKERS = 10  # parallel threads
 # ----------------------------------------------
+
 
 # Disable SSL warnings (insecure mode)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -26,6 +43,16 @@ gl = gitlab.Gitlab(GITLAB_URL, private_token=GITLAB_TOKEN, ssl_verify=False)
 # Regex for release branches (case-insensitive, matches "release", "Release", "release-abc", "release/abc")
 RELEASE_PATTERN = re.compile(r"(?:^|/)(release[-/]?.*)", re.IGNORECASE)
 
+def get_group(gl):
+    """Return group object by ID (preferred) or name (fallback)."""
+    if GROUP_ID:
+        logger.info(f"Fetching group by ID {GROUP_ID}")
+        return gl.groups.get(GROUP_ID)
+    elif GROUP_NAME:
+        logger.info(f"Fetching group by name {GROUP_NAME}")
+        return gl.groups.get(GROUP_NAME)
+    else:
+        raise ValueError("You must set either GROUP_ID or GROUP_NAME")
 
 def fetch_project_mrs(proj):
     """Fetch all MRs targeting release branches for a project."""
@@ -53,7 +80,7 @@ def fetch_pipeline_jobs(pipeline):
 
 
 def main():
-    group = gl.groups.get(GROUP_NAME)
+    group = get_group(gl)
     projects = group.projects.list(all=True)
 
     all_mr_data = []
@@ -72,16 +99,13 @@ def main():
         for mr in mrs:
             logger.info(f"  MR !{mr.iid} - {mr.title} (branch {mr.target_branch})")
 
-            pipelines = []
             try:
                 pipelines = mr.pipelines.list(all=True)
             except Exception as e:
                 logger.error(f"    Failed to fetch pipelines for MR !{mr.iid}: {e}")
                 continue
 
-            problematic_jobs = []
-            pipeline_ids = []
-            pipeline_urls = []
+            pipeline_jobs_map = {}
 
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 future_jobs = {
@@ -96,36 +120,47 @@ def main():
                     except Exception:
                         continue
 
-                    # Only include failed/skipped/canceled/manual jobs
                     bad_jobs = [
-                        (job.stage, job.name, job.web_url)
+                        (job.stage, job.name, job.web_url, job.status)
                         for job in jobs
                         if job.status in ("failed", "skipped", "canceled", "manual")
                     ]
 
                     if bad_jobs:
-                        pipeline_ids.append(str(pipeline.id))
-                        pipeline_urls.append(pipeline.web_url)
-                        problematic_jobs.extend(bad_jobs)
+                        pid = str(pipeline.id)
+                        pipeline_jobs_map[pid] = {
+                            "url": pipeline.web_url,
+                            "status": pipeline.status,
+                            "jobs": bad_jobs,
+                        }
 
-            if not problematic_jobs:
+            if not pipeline_jobs_map:
                 logger.info(f"    Skipping MR !{mr.iid} (all pipelines successful)")
                 continue
+
+            # Parse updated_at to datetime (Excel requires a datetime object)
+            updated_at = None
+            if mr.updated_at:
+                try:
+                    updated_at = datetime.fromisoformat(mr.updated_at.replace("Z", "+00:00"))
+                except Exception:
+                    updated_at = None
 
             all_mr_data.append({
                 "Project": proj.name,
                 "MR_ID": mr.iid,
                 "MR_Title": mr.title,
                 "MR_URL": mr.web_url,
-                "PipelineIDs": pipeline_ids,
-                "PipelineURLs": pipeline_urls,
-                "ProblematicJobs": problematic_jobs,
+                "MR_Author": mr.author["name"] if mr.author else "Unknown",
+                "MR_Updated": updated_at,
+                "Pipelines": pipeline_jobs_map,
             })
 
-            # Debug print to console
-            logger.info(f"    MR !{mr.iid} has {len(problematic_jobs)} problematic jobs")
-            for stage, job, url in problematic_jobs:
-                logger.info(f"      - {stage}: {job} ({url})")
+            logger.info(f"    MR !{mr.iid} has failing/skipped jobs")
+            for pid, pdata in pipeline_jobs_map.items():
+                logger.info(f"      Pipeline {pid} ({pdata['status']}):")
+                for stage, job, url, jstatus in pdata["jobs"]:
+                    logger.info(f"        - {stage}: {job} ({jstatus}) {url}")
 
     # ---------------- Excel Export ----------------
     workbook = xlsxwriter.Workbook(OUTPUT_FILE)
@@ -135,36 +170,41 @@ def main():
         "Project",
         "MR ID",
         "MR Title",
+        "MR Author",
+        "MR Last Updated",
         "MR URL",
-        "Pipelines",
+        "Pipeline",
+        "Pipeline Status",
         "Problematic Job"
     ]
 
     header_fmt = workbook.add_format({"bold": True, "bg_color": "#D7E4BC", "text_wrap": True})
     wrap_fmt = workbook.add_format({"text_wrap": True})
+    datetime_fmt = workbook.add_format({"num_format": "yyyy-mm-dd hh:mm:ss"})
 
     for col, h in enumerate(headers):
         worksheet.write(0, col, h, header_fmt)
 
     row = 1
     for mr_entry in all_mr_data:
-        for stage, job, url in mr_entry["ProblematicJobs"]:
-            worksheet.write(row, 0, mr_entry["Project"], wrap_fmt)
-            worksheet.write(row, 1, mr_entry["MR_ID"], wrap_fmt)
-            worksheet.write(row, 2, mr_entry["MR_Title"], wrap_fmt)
-            worksheet.write_url(row, 3, mr_entry["MR_URL"], string="Link", cell_format=wrap_fmt)
+        for pid, pdata in mr_entry["Pipelines"].items():
+            for stage, job, url, jstatus in pdata["jobs"]:
+                worksheet.write(row, 0, mr_entry["Project"], wrap_fmt)
+                worksheet.write(row, 1, mr_entry["MR_ID"], wrap_fmt)
+                worksheet.write(row, 2, mr_entry["MR_Title"], wrap_fmt)
+                worksheet.write(row, 3, mr_entry["MR_Author"], wrap_fmt)
 
-            if mr_entry["PipelineIDs"]:
-                pipeline_links = [
-                    f"{pid} ({purl})"
-                    for pid, purl in zip(mr_entry["PipelineIDs"], mr_entry["PipelineURLs"])
-                ]
-                worksheet.write(row, 4, ", ".join(pipeline_links), wrap_fmt)
-            else:
-                worksheet.write(row, 4, "N/A", wrap_fmt)
+                if mr_entry["MR_Updated"]:
+                    worksheet.write_datetime(row, 4, mr_entry["MR_Updated"], datetime_fmt)
+                else:
+                    worksheet.write(row, 4, "N/A", wrap_fmt)
 
-            worksheet.write_url(row, 5, url, string=f"{stage}: {job}", cell_format=wrap_fmt)
-            row += 1
+                worksheet.write_url(row, 5, mr_entry["MR_URL"], string="Link", cell_format=wrap_fmt)
+                worksheet.write_url(row, 6, pdata["url"], string=pid, cell_format=wrap_fmt)
+                worksheet.write(row, 7, pdata["status"], wrap_fmt)  # pipeline status
+                worksheet.write_url(row, 8, url, string=f"{stage}: {job} ({jstatus})", cell_format=wrap_fmt)
+
+                row += 1
 
     workbook.close()
     logger.info(f"Report written to {OUTPUT_FILE}")
