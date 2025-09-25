@@ -1,0 +1,108 @@
+import gitlab
+import xlsxwriter
+
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+GITLAB_URL = "https://gitlab.com"        # Change if self-hosted
+PRIVATE_TOKEN = "YOUR_PRIVATE_TOKEN"     # GitLab personal access token
+GROUP_ID = 987654                        # GitLab group/namespace ID
+RELEASE_BRANCH = "release/1.0.0"         # Release branch name
+OUTPUT_FILE = "gitlab_pipeline_summary.xlsx"
+# -------------------------------
+
+# Connect to GitLab
+gl = gitlab.Gitlab(GITLAB_URL, private_token=PRIVATE_TOKEN)
+group = gl.groups.get(GROUP_ID)
+
+records = []
+
+for project in group.projects.list(all=True, include_subgroups=True):
+    proj = gl.projects.get(project.id)
+    mrs = proj.mergerequests.list(target_branch=RELEASE_BRANCH, state="merged", all=True)
+
+    for mr in mrs:
+        if not mr.merge_commit_sha:
+            continue
+
+        pipelines = proj.pipelines.list(sha=mr.merge_commit_sha, all=True)
+        if not pipelines:
+            records.append({
+                "Project": proj.path_with_namespace,
+                "MergeRequestText": f"!{mr.iid} {mr.title}",
+                "MergeRequestURL": mr.web_url,
+                "Author": mr.author['username'],
+                "PipelineID": None,
+                "PipelineStatus": "No pipelines",
+                "PipelineURL": "",
+                "ProblematicJobs": []
+            })
+            continue
+
+        for pipe in pipelines:
+            pipeline = proj.pipelines.get(pipe.id)
+
+            if pipeline.status not in ["failed", "canceled", "skipped"]:
+                continue
+
+            jobs = [
+                job for job in pipeline.jobs.list(all=True)
+                if job.status in ["failed", "skipped", "canceled", "manual"]
+            ]
+
+            job_summaries = []
+            for job in jobs:
+                job_summaries.append(
+                    (f"{job.stage}/{job.name} → {job.status}", job.web_url)
+                )
+
+            records.append({
+                "Project": proj.path_with_namespace,
+                "MergeRequestText": f"!{mr.iid} {mr.title}",
+                "MergeRequestURL": mr.web_url,
+                "Author": mr.author['username'],
+                "PipelineID": pipeline.id,
+                "PipelineStatus": pipeline.status,
+                "PipelineURL": pipeline.web_url,
+                "ProblematicJobs": job_summaries
+            })
+
+# -------------------------------
+# Export to Excel with hyperlinks
+# -------------------------------
+workbook = xlsxwriter.Workbook(OUTPUT_FILE)
+worksheet = workbook.add_worksheet("Summary")
+
+headers = ["Project", "MergeRequest", "Author", "PipelineID",
+           "PipelineStatus", "PipelineURL", "ProblematicJobs"]
+
+# Write headers
+for col, header in enumerate(headers):
+    worksheet.write(0, col, header)
+
+wrap_format = workbook.add_format({'text_wrap': True})
+
+row = 1
+for rec in records:
+    worksheet.write(row, 0, rec["Project"])
+    worksheet.write_url(row, 1, rec["MergeRequestURL"], string=rec["MergeRequestText"])
+    worksheet.write(row, 2, rec["Author"])
+    worksheet.write(row, 3, rec["PipelineID"] if rec["PipelineID"] else "")
+    worksheet.write(row, 4, rec["PipelineStatus"])
+    if rec["PipelineURL"]:
+        worksheet.write_url(row, 5, rec["PipelineURL"], string=str(rec["PipelineID"]))
+    else:
+        worksheet.write(row, 5, "")
+
+    # Problematic jobs as multi-line hyperlinks
+    if rec["ProblematicJobs"]:
+        for i, (text, url) in enumerate(rec["ProblematicJobs"]):
+            worksheet.write_url(row + i, 6, url, string=text, cell_format=wrap_format)
+        row += len(rec["ProblematicJobs"]) - 1
+    else:
+        worksheet.write(row, 6, "")
+
+    row += 1
+
+workbook.close()
+print(f"✅ Exported clickable summary to {OUTPUT_FILE}")
