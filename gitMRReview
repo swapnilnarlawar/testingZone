@@ -1,193 +1,174 @@
 import gitlab
-import xlsxwriter
 import logging
 import re
-from collections import defaultdict
 import urllib3
-from datetime import datetime
+import xlsxwriter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# -------------------------------
-# CONFIGURATION
-# -------------------------------
-GITLAB_URL = "https://your-gitlab-server"
-PRIVATE_TOKEN = "YOUR_PRIVATE_TOKEN"
-GROUP_ID = 987654
-RELEASE_NAME = "ABC"  # release identifier
-OUTPUT_FILE_BASE = "gitlab_pipeline_summary.xlsx"
-SSL_VERIFY = False
-LOG_LEVEL = logging.INFO
-MAX_THREADS = 10  # threads for parallel pipeline/job fetching
-# -------------------------------
+# ------------------- CONFIG -------------------
+GITLAB_URL = "https://gitlab.example.com"
+GITLAB_TOKEN = "YOUR_TOKEN"
+GROUP_NAME = "your-group-name"
+OUTPUT_FILE = "merge_requests_report.xlsx"
+MAX_WORKERS = 10  # parallel threads
+# ----------------------------------------------
 
-# Timestamped output file
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-OUTPUT_FILE = OUTPUT_FILE_BASE.replace(".xlsx", f"_{timestamp}.xlsx")
-
-# Disable SSL warnings if necessary
-if not SSL_VERIFY:
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Regex for release branch matching
-release_pattern = re.compile(rf"release[-/]{RELEASE_NAME}", re.IGNORECASE)
+# Disable SSL warnings (insecure mode)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Logging
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # Connect to GitLab
-gl = gitlab.Gitlab(GITLAB_URL, private_token=PRIVATE_TOKEN, ssl_verify=SSL_VERIFY)
-gl.auth()
-logger.info("Connected to GitLab")
+gl = gitlab.Gitlab(GITLAB_URL, private_token=GITLAB_TOKEN, ssl_verify=False)
 
-group = gl.groups.get(GROUP_ID)
+# Regex for release branches (case-insensitive, matches "release", "Release", "release-abc", "release/abc")
+RELEASE_PATTERN = re.compile(r"(?:^|/)(release[-/]?.*)", re.IGNORECASE)
 
-# Data storage
-mr_dict = defaultdict(lambda: {
-    "Project": "",
-    "MergeRequestText": "",
-    "MergeRequestURL": "",
-    "Author": "",
-    "PipelineIDs": [],
-    "ProblematicJobs": []
-})
 
-# -------------------------------
-# Helper: fetch jobs for a pipeline
-# -------------------------------
-def fetch_pipeline_jobs(proj_id, pipeline_id):
+def fetch_project_mrs(proj):
+    """Fetch all MRs targeting release branches for a project."""
     try:
-        proj = gl.projects.get(proj_id)
-        pipeline = proj.pipelines.get(pipeline_id)
-        if pipeline.status == "success":
-            return None  # skip successful pipelines
-        # Only fetch failed/skipped/canceled/manual jobs
-        jobs = pipeline.jobs.list(scope=['failed','skipped','canceled','manual'], all=True)
-        job_summaries = []
-        stages_with_jobs = set()
-        for job in jobs:
-            stages_with_jobs.add(job.stage)
-            job_summaries.append((
-                job.stage,
-                f"[Pipeline {pipeline.id}] {job.stage}/{job.name} → {job.status}",
-                job.web_url
-            ))
-        # Derive stages from jobs themselves
-        pipeline_stages = sorted(set(job.stage for job in jobs))
-        stage_order = {stage: i for i, stage in enumerate(pipeline_stages)}
-        job_summaries.sort(key=lambda x: stage_order.get(x[0], 999))
-        return pipeline.id, job_summaries
+        mrs = proj.mergerequests.list(state="opened", all=True)
     except Exception as e:
-        logger.warning(f"Error fetching jobs for pipeline {pipeline_id} in project {proj_id}: {e}")
-        return None
+        logger.error(f"Failed to fetch MRs for {proj.name}: {e}")
+        return []
 
-# -------------------------------
-# Process projects
-# -------------------------------
-for project in group.projects.list(all=True, include_subgroups=True):
+    valid_mrs = []
+    for mr in mrs:
+        target_branch = mr.target_branch or ""
+        if RELEASE_PATTERN.search(target_branch):
+            valid_mrs.append(mr)
+    return valid_mrs
+
+
+def fetch_pipeline_jobs(pipeline):
+    """Fetch all jobs for a given pipeline."""
     try:
-        proj = gl.projects.get(project.id)
-        logger.info(f"Processing project: {proj.path_with_namespace}")
+        return pipeline.jobs.list(all=True)
     except Exception as e:
-        logger.warning(f"Skipping project {project.id}: {e}")
-        continue
+        logger.error(f"Failed to fetch jobs for pipeline {pipeline.id}: {e}")
+        return []
 
-    # Step 1: list branches matching release pattern
-    try:
-        branches = [b.name for b in proj.branches.list(all=True) if re.search(r'release[-/]', b.name, re.I)]
-        release_branches = [b for b in branches if release_pattern.search(b)]
-        if not release_branches:
-            logger.info(f"No release branches found for {proj.path_with_namespace}")
+
+def main():
+    group = gl.groups.get(GROUP_NAME)
+    projects = group.projects.list(all=True)
+
+    all_mr_data = []
+
+    logger.info(f"Found {len(projects)} projects in group {GROUP_NAME}")
+
+    for proj_info in projects:
+        proj = gl.projects.get(proj_info.id)
+        mrs = fetch_project_mrs(proj)
+
+        if not mrs:
             continue
-    except Exception as e:
-        logger.warning(f"Failed to list branches: {e}")
-        continue
 
-    # Step 2: list MRs targeting these release branches
-    for branch in release_branches:
-        try:
-            mrs = proj.mergerequests.list(state='merged', target_branch=branch, all=True)
-        except Exception as e:
-            logger.warning(f"Failed to list MRs for branch {branch}: {e}")
-            continue
+        logger.info(f"Project {proj.name}: Found {len(mrs)} release MRs")
 
         for mr in mrs:
-            if not mr.merge_commit_sha:
+            logger.info(f"  MR !{mr.iid} - {mr.title} (branch {mr.target_branch})")
+
+            pipelines = []
+            try:
+                pipelines = mr.pipelines.list(all=True)
+            except Exception as e:
+                logger.error(f"    Failed to fetch pipelines for MR !{mr.iid}: {e}")
                 continue
 
-            # Console output
-            print(f"Found MR: !{mr.iid} | Title: {mr.title} | Author: {mr.author.get('username','unknown')} | Target branch: {mr.target_branch}")
+            problematic_jobs = []
+            pipeline_ids = []
+            pipeline_urls = []
 
-            key = (proj.name, mr.iid)
-            mr_entry = mr_dict[key]
-            mr_entry.update({
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                future_jobs = {
+                    executor.submit(fetch_pipeline_jobs, pipeline): pipeline
+                    for pipeline in pipelines
+                }
+
+                for future in as_completed(future_jobs):
+                    pipeline = future_jobs[future]
+                    try:
+                        jobs = future.result()
+                    except Exception:
+                        continue
+
+                    # Only include failed/skipped/canceled/manual jobs
+                    bad_jobs = [
+                        (job.stage, job.name, job.web_url)
+                        for job in jobs
+                        if job.status in ("failed", "skipped", "canceled", "manual")
+                    ]
+
+                    if bad_jobs:
+                        pipeline_ids.append(str(pipeline.id))
+                        pipeline_urls.append(pipeline.web_url)
+                        problematic_jobs.extend(bad_jobs)
+
+            if not problematic_jobs:
+                logger.info(f"    Skipping MR !{mr.iid} (all pipelines successful)")
+                continue
+
+            all_mr_data.append({
                 "Project": proj.name,
-                "MergeRequestText": f"!{mr.iid} {mr.title}",
-                "MergeRequestURL": mr.web_url,
-                "Author": mr.author.get('username','unknown')
+                "MR_ID": mr.iid,
+                "MR_Title": mr.title,
+                "MR_URL": mr.web_url,
+                "PipelineIDs": pipeline_ids,
+                "PipelineURLs": pipeline_urls,
+                "ProblematicJobs": problematic_jobs,
             })
 
-            # Step 3: fetch pipelines for MR's merge commit
-            try:
-                pipelines = proj.pipelines.list(sha=mr.merge_commit_sha, all=True)
-            except Exception as e:
-                logger.warning(f"Failed to list pipelines for MR !{mr.iid}: {e}")
-                continue
+            # Debug print to console
+            logger.info(f"    MR !{mr.iid} has {len(problematic_jobs)} problematic jobs")
+            for stage, job, url in problematic_jobs:
+                logger.info(f"      - {stage}: {job} ({url})")
 
-            # Step 4: fetch pipeline jobs in parallel
-            problematic_found = False
-            with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-                future_to_pid = {executor.submit(fetch_pipeline_jobs, proj.id, pipe.id): pipe.id for pipe in pipelines}
-                for future in as_completed(future_to_pid):
-                    result = future.result()
-                    if result:
-                        pid, job_summaries = result
-                        mr_entry["PipelineIDs"].append(pid)
-                        if job_summaries:  # only add jobs if there are problematic ones
-                            mr_entry["ProblematicJobs"].extend(job_summaries)
-                        problematic_found = True
+    # ---------------- Excel Export ----------------
+    workbook = xlsxwriter.Workbook(OUTPUT_FILE)
+    worksheet = workbook.add_worksheet("MR Pipelines")
 
-            # Skip MR if no pipelines had problematic jobs
-            if not problematic_found:
-                logger.info(f"Skipping MR !{mr.iid} in project {proj.name} because all pipelines are successful")
-                del mr_dict[key]  # remove from dict
-                continue
+    headers = [
+        "Project",
+        "MR ID",
+        "MR Title",
+        "MR URL",
+        "Pipelines",
+        "Problematic Job"
+    ]
 
-# -------------------------------
-# Export to Excel
-# -------------------------------
-workbook = xlsxwriter.Workbook(OUTPUT_FILE)
-worksheet = workbook.add_worksheet("Summary")
-headers = ["Project", "MergeRequest", "Author", "Pipeline", "ProblematicJobs"]
-for col, header in enumerate(headers):
-    worksheet.write(0, col, header, workbook.add_format({'bold': True}))
+    header_fmt = workbook.add_format({"bold": True, "bg_color": "#D7E4BC", "text_wrap": True})
+    wrap_fmt = workbook.add_format({"text_wrap": True})
 
-wrap_format = workbook.add_format({'text_wrap': True})
-row = 1
+    for col, h in enumerate(headers):
+        worksheet.write(0, col, h, header_fmt)
 
-for mr_entry in mr_dict.values():
-    worksheet.write(row, 0, mr_entry["Project"])
-    worksheet.write_url(row, 1, mr_entry["MergeRequestURL"], string=mr_entry["MergeRequestText"])
-    worksheet.write(row, 2, mr_entry["Author"])
+    row = 1
+    for mr_entry in all_mr_data:
+        for stage, job, url in mr_entry["ProblematicJobs"]:
+            worksheet.write(row, 0, mr_entry["Project"], wrap_fmt)
+            worksheet.write(row, 1, mr_entry["MR_ID"], wrap_fmt)
+            worksheet.write(row, 2, mr_entry["MR_Title"], wrap_fmt)
+            worksheet.write_url(row, 3, mr_entry["MR_URL"], string="Link", cell_format=wrap_fmt)
 
-    if len(mr_entry["PipelineIDs"]) == 1:
-        pid = mr_entry["PipelineIDs"][0]
-        pipeline_url = f"{GITLAB_URL}/{mr_entry['Project']}/-/pipelines/{pid}"
-        worksheet.write_url(row, 3, pipeline_url, string=str(pid))
-    elif len(mr_entry["PipelineIDs"]) > 1:
-        latest_pid = max(mr_entry["PipelineIDs"])
-        pipeline_url = f"{GITLAB_URL}/{mr_entry['Project']}/-/pipelines/{latest_pid}"
-        worksheet.write_url(row, 3, pipeline_url, string="Multiple pipelines")
-    else:
-        worksheet.write(row, 3, "")
+            if mr_entry["PipelineIDs"]:
+                pipeline_links = [
+                    f"{pid} ({purl})"
+                    for pid, purl in zip(mr_entry["PipelineIDs"], mr_entry["PipelineURLs"])
+                ]
+                worksheet.write(row, 4, ", ".join(pipeline_links), wrap_fmt)
+            else:
+                worksheet.write(row, 4, "N/A", wrap_fmt)
 
-    if mr_entry["ProblematicJobs"]:
-        start_row = row
-        for i, (text, url) in enumerate(mr_entry["ProblematicJobs"]):
-            worksheet.write_url(start_row + i, 4, url, string=text, cell_format=wrap_format)
-        row += len(mr_entry["ProblematicJobs"]) - 1
+            worksheet.write_url(row, 5, url, string=f"{stage}: {job}", cell_format=wrap_fmt)
+            row += 1
 
-    row += 1
+    workbook.close()
+    logger.info(f"Report written to {OUTPUT_FILE}")
 
-workbook.close()
-logger.info(f"✅ Exported Excel summary to {OUTPUT_FILE}")
+
+if __name__ == "__main__":
+    main()
