@@ -1,13 +1,25 @@
 import requests
 import pandas as pd
-from collections import defaultdict
+import urllib3
+import logging
 
 # ====== CONFIGURATION ======
 GITLAB_URL = "https://gitlab.example.com"
 PRIVATE_TOKEN = "<YOUR_ACCESS_TOKEN>"
 GROUP_ID = "<YOUR_GROUP_ID>"
+SSL_VERIFY = False   # disable SSL verification if cert is self-signed
 
 HEADERS = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
 # ====== ACCESS LEVEL MAPPING ======
 ACCESS_LEVELS = {
@@ -18,80 +30,122 @@ ACCESS_LEVELS = {
     50: "Owner"
 }
 
-# ====== HELPER FUNCTIONS ======
 def access_level_name(level):
     return ACCESS_LEVELS.get(level, f"Unknown ({level})")
 
+# ====== HELPER FUNCTIONS ======
 def fetch_json(url):
-    page = 1
     results = []
+    page = 1
     while True:
-        resp = requests.get(f"{url}?page={page}&per_page=100", headers=HEADERS).json()
-        if not resp:
+        resp = requests.get(f"{url}?page={page}&per_page=100", headers=HEADERS, verify=SSL_VERIFY)
+        if resp.status_code != 200:
+            logging.error(f"Failed to fetch {url}, status {resp.status_code}, response: {resp.text}")
             break
-        results.extend(resp)
+        data = resp.json()
+        if not data:
+            break
+        results.extend(data)
         page += 1
     return results
 
 def get_group_members(group_id):
-    return fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/members/all")
+    logging.info(f"Fetching members of group {group_id}")
+    direct = fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/members")
+    all_members = fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/members/all")
 
-def get_group_projects(group_id):
-    return fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/projects")
+    direct_ids = {m["id"] for m in direct}
+    results = []
+
+    for m in direct:
+        m["membership_type"] = "Direct"
+        results.append(m)
+
+    for m in all_members:
+        if m["id"] not in direct_ids:  # inherited only
+            m["membership_type"] = "Inherited"
+            results.append(m)
+
+    return results
 
 def get_project_members(project_id):
-    return fetch_json(f"{GITLAB_URL}/api/v4/projects/{project_id}/members/all")
+    logging.info(f"Fetching members of project {project_id}")
+    direct = fetch_json(f"{GITLAB_URL}/api/v4/projects/{project_id}/members")
+    all_members = fetch_json(f"{GITLAB_URL}/api/v4/projects/{project_id}/members/all")
+
+    direct_ids = {m["id"] for m in direct}
+    results = []
+
+    for m in direct:
+        m["membership_type"] = "Direct"
+        results.append(m)
+
+    for m in all_members:
+        if m["id"] not in direct_ids:  # inherited only
+            m["membership_type"] = "Inherited"
+            results.append(m)
+
+    return results
+
+def get_group_projects(group_id):
+    logging.info(f"Fetching projects under group {group_id}")
+    return fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/projects")
 
 def get_subgroups(group_id):
+    logging.info(f"Fetching subgroups of group {group_id}")
     return fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/subgroups")
 
 # ====== RECURSIVE FETCH ======
 def fetch_all_members(group_id, path="Group"):
-    members_dict = defaultdict(lambda: {"Username": "", "Name": "", "Access Level": "", "Sources": set(), "Potential Build Eng": "No"})
+    records = []
 
     # 1️⃣ Group members
     for m in get_group_members(group_id):
-        uid = m['id']
-        members_dict[uid]["Username"] = m['username']
-        members_dict[uid]["Name"] = m['name']
-        members_dict[uid]["Access Level"] = access_level_name(m['access_level'])
-        members_dict[uid]["Potential Build Eng"] = "Yes" if m['access_level'] >= 30 else "No"
-        members_dict[uid]["Sources"].add(path)
+        records.append({
+            "Username": m["username"],
+            "Name": m["name"],
+            "Access Level": access_level_name(m["access_level"]),
+            "Potential Build Eng": "Yes" if m["access_level"] >= 30 else "No",
+            "Source": path,
+            "Membership Type": m.get("membership_type", "Unknown")
+        })
 
-    # 2️⃣ Projects in this group
+    # 2️⃣ Projects
     for project in get_group_projects(group_id):
         proj_path = f"Project: {project['name']}"
-        for m in get_project_members(project['id']):
-            uid = m['id']
-            members_dict[uid]["Username"] = m['username']
-            members_dict[uid]["Name"] = m['name']
-            members_dict[uid]["Access Level"] = access_level_name(m['access_level'])
-            members_dict[uid]["Potential Build Eng"] = "Yes" if m['access_level'] >= 30 else "No"
-            members_dict[uid]["Sources"].add(proj_path)
+        for m in get_project_members(project["id"]):
+            records.append({
+                "Username": m["username"],
+                "Name": m["name"],
+                "Access Level": access_level_name(m["access_level"]),
+                "Potential Build Eng": "Yes" if m["access_level"] >= 30 else "No",
+                "Source": proj_path,
+                "Membership Type": m.get("membership_type", "Unknown")
+            })
 
-    # 3️⃣ Recursively fetch subgroups
+    # 3️⃣ Subgroups
     for subgroup in get_subgroups(group_id):
         sub_path = f"Subgroup: {subgroup['name']}"
-        sub_members = fetch_all_members(subgroup['id'], path=sub_path)
-        for uid, info in sub_members.items():
-            members_dict[uid]["Username"] = info["Username"]
-            members_dict[uid]["Name"] = info["Name"]
-            members_dict[uid]["Access Level"] = info["Access Level"]
-            if info["Potential Build Eng"] == "Yes":
-                members_dict[uid]["Potential Build Eng"] = "Yes"
-            members_dict[uid]["Sources"].update(info["Sources"])
+        records.extend(fetch_all_members(subgroup["id"], path=sub_path))
 
-    return members_dict
+    return records
 
-# ====== FETCH AND OUTPUT ======
-all_members = fetch_all_members(GROUP_ID)
+# ====== MAIN ======
+if __name__ == "__main__":
+    logging.info("Starting GitLab user fetch...")
 
-# Convert Sources set to comma-separated string
-for uid in all_members:
-    all_members[uid]["Sources"] = ", ".join(sorted(all_members[uid]["Sources"]))
+    all_records = fetch_all_members(GROUP_ID)
+    logging.info(f"Fetched {len(all_records)} user-source records (raw, including duplicates).")
 
-df = pd.DataFrame(all_members.values())
-df = df.sort_values(by="Name")
+    # Convert to DataFrame
+    df = pd.DataFrame(all_records)
+    df = df.sort_values(by=["Name", "Source", "Membership Type"])
 
-print(df.to_string(index=False))
-df.to_csv("gitlab_group_full_user_mapping.csv", index=False)
+    # Show preview
+    logging.info("Preview of results:")
+    print(df.head(20).to_string(index=False))
+
+    # Save CSV
+    output_file = "gitlab_group_user_mapping.csv"
+    df.to_csv(output_file, index=False)
+    logging.info(f"Results written to {output_file}")
