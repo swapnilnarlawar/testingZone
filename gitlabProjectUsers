@@ -49,6 +49,13 @@ def fetch_json(url):
         page += 1
     return results
 
+def get_group_details(group_id):
+    resp = requests.get(f"{GITLAB_URL}/api/v4/groups/{group_id}", headers=HEADERS, verify=SSL_VERIFY)
+    if resp.status_code != 200:
+        logging.error(f"Failed to fetch group details for {group_id}, status {resp.status_code}, response: {resp.text}")
+        return {"name": f"Group:{group_id}", "id": group_id}
+    return resp.json()
+
 def get_group_members(group_id):
     logging.info(f"Fetching members of group {group_id}")
     direct = fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/members")
@@ -62,7 +69,7 @@ def get_group_members(group_id):
         results.append(m)
 
     for m in all_members:
-        if m["id"] not in direct_ids:  # inherited only
+        if m["id"] not in direct_ids:
             m["membership_type"] = "Inherited"
             results.append(m)
 
@@ -81,7 +88,7 @@ def get_project_members(project_id):
         results.append(m)
 
     for m in all_members:
-        if m["id"] not in direct_ids:  # inherited only
+        if m["id"] not in direct_ids:
             m["membership_type"] = "Inherited"
             results.append(m)
 
@@ -96,7 +103,7 @@ def get_subgroups(group_id):
     return fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/subgroups")
 
 # ====== RECURSIVE FETCH ======
-def fetch_all_members(group_id, path="Group"):
+def fetch_all_members(group_id, path="Group", source_id=None):
     records = []
 
     # 1️⃣ Group members
@@ -107,6 +114,7 @@ def fetch_all_members(group_id, path="Group"):
             "Access Level": access_level_name(m["access_level"]),
             "Potential Build Eng": "Yes" if m["access_level"] >= 30 else "No",
             "Source": path,
+            "Source ID": source_id,
             "Membership Type": m.get("membership_type", "Unknown")
         })
 
@@ -120,13 +128,14 @@ def fetch_all_members(group_id, path="Group"):
                 "Access Level": access_level_name(m["access_level"]),
                 "Potential Build Eng": "Yes" if m["access_level"] >= 30 else "No",
                 "Source": proj_path,
+                "Source ID": project["id"],
                 "Membership Type": m.get("membership_type", "Unknown")
             })
 
     # 3️⃣ Subgroups
     for subgroup in get_subgroups(group_id):
         sub_path = f"Subgroup: {subgroup['name']}"
-        records.extend(fetch_all_members(subgroup["id"], path=sub_path))
+        records.extend(fetch_all_members(subgroup['id'], path=sub_path, source_id=subgroup['id']))
 
     return records
 
@@ -134,7 +143,10 @@ def fetch_all_members(group_id, path="Group"):
 if __name__ == "__main__":
     logging.info("Starting GitLab user fetch...")
 
-    all_records = fetch_all_members(GROUP_ID)
+    root_group = get_group_details(GROUP_ID)
+    root_group_name = f"Group: {root_group['name']}"
+    all_records = fetch_all_members(GROUP_ID, path=root_group_name, source_id=root_group["id"])
+
     logging.info(f"Fetched {len(all_records)} user-source records (raw, including duplicates).")
 
     # Convert to DataFrame
