@@ -1,0 +1,97 @@
+import requests
+import pandas as pd
+from collections import defaultdict
+
+# ====== CONFIGURATION ======
+GITLAB_URL = "https://gitlab.example.com"
+PRIVATE_TOKEN = "<YOUR_ACCESS_TOKEN>"
+GROUP_ID = "<YOUR_GROUP_ID>"
+
+HEADERS = {"PRIVATE-TOKEN": PRIVATE_TOKEN}
+
+# ====== ACCESS LEVEL MAPPING ======
+ACCESS_LEVELS = {
+    10: "Guest",
+    20: "Reporter",
+    30: "Developer",
+    40: "Maintainer",
+    50: "Owner"
+}
+
+# ====== HELPER FUNCTIONS ======
+def access_level_name(level):
+    return ACCESS_LEVELS.get(level, f"Unknown ({level})")
+
+def fetch_json(url):
+    page = 1
+    results = []
+    while True:
+        resp = requests.get(f"{url}?page={page}&per_page=100", headers=HEADERS).json()
+        if not resp:
+            break
+        results.extend(resp)
+        page += 1
+    return results
+
+def get_group_members(group_id):
+    return fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/members/all")
+
+def get_group_projects(group_id):
+    return fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/projects")
+
+def get_project_members(project_id):
+    return fetch_json(f"{GITLAB_URL}/api/v4/projects/{project_id}/members/all")
+
+def get_subgroups(group_id):
+    return fetch_json(f"{GITLAB_URL}/api/v4/groups/{group_id}/subgroups")
+
+# ====== RECURSIVE FETCH ======
+def fetch_all_members(group_id, path="Group"):
+    members_dict = defaultdict(lambda: {"Username": "", "Name": "", "Access Level": "", "Sources": set(), "Potential Build Eng": "No"})
+
+    # 1️⃣ Group members
+    for m in get_group_members(group_id):
+        uid = m['id']
+        members_dict[uid]["Username"] = m['username']
+        members_dict[uid]["Name"] = m['name']
+        members_dict[uid]["Access Level"] = access_level_name(m['access_level'])
+        members_dict[uid]["Potential Build Eng"] = "Yes" if m['access_level'] >= 30 else "No"
+        members_dict[uid]["Sources"].add(path)
+
+    # 2️⃣ Projects in this group
+    for project in get_group_projects(group_id):
+        proj_path = f"Project: {project['name']}"
+        for m in get_project_members(project['id']):
+            uid = m['id']
+            members_dict[uid]["Username"] = m['username']
+            members_dict[uid]["Name"] = m['name']
+            members_dict[uid]["Access Level"] = access_level_name(m['access_level'])
+            members_dict[uid]["Potential Build Eng"] = "Yes" if m['access_level'] >= 30 else "No"
+            members_dict[uid]["Sources"].add(proj_path)
+
+    # 3️⃣ Recursively fetch subgroups
+    for subgroup in get_subgroups(group_id):
+        sub_path = f"Subgroup: {subgroup['name']}"
+        sub_members = fetch_all_members(subgroup['id'], path=sub_path)
+        for uid, info in sub_members.items():
+            members_dict[uid]["Username"] = info["Username"]
+            members_dict[uid]["Name"] = info["Name"]
+            members_dict[uid]["Access Level"] = info["Access Level"]
+            if info["Potential Build Eng"] == "Yes":
+                members_dict[uid]["Potential Build Eng"] = "Yes"
+            members_dict[uid]["Sources"].update(info["Sources"])
+
+    return members_dict
+
+# ====== FETCH AND OUTPUT ======
+all_members = fetch_all_members(GROUP_ID)
+
+# Convert Sources set to comma-separated string
+for uid in all_members:
+    all_members[uid]["Sources"] = ", ".join(sorted(all_members[uid]["Sources"]))
+
+df = pd.DataFrame(all_members.values())
+df = df.sort_values(by="Name")
+
+print(df.to_string(index=False))
+df.to_csv("gitlab_group_full_user_mapping.csv", index=False)
