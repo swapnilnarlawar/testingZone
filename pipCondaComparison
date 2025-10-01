@@ -1,0 +1,95 @@
+#!/bin/bash
+
+# ==============================================================================
+# pip_only_packages.sh
+#
+# Lists all Python packages installed via pip but NOT tracked by Conda in the
+# current Conda environment. Can optionally save to a file or uninstall them.
+#
+# Requirements:
+# - Bash
+# - Python in the active Conda environment
+# - comm, awk, sort (standard in Git Bash / Linux / macOS)
+#
+# Author: Swapnil-style helper
+# ==============================================================================
+
+# -----------------------------
+# Default settings
+# -----------------------------
+UNINSTALL=false
+OUTPUT_FILE=""
+SHOW_HELP=false
+
+# -----------------------------
+# Helper / usage function
+# -----------------------------
+usage() {
+    cat <<EOF
+Usage: $0 [options]
+
+Options:
+  --uninstall          Uninstall all pip-only packages found
+  --output <file>      Save the list of pip-only packages to a file
+  -h, --help           Show this help message and exit
+
+Examples:
+  $0
+      List pip-only packages in the current environment
+
+  $0 --output pip_only.txt
+      Save pip-only packages to 'pip_only.txt'
+
+  $0 --uninstall
+      Uninstall all pip-only packages in the current environment
+
+  $0 --output pip_only.txt --uninstall
+      Save pip-only packages to file and uninstall them
+EOF
+}
+
+# -----------------------------
+# Parse arguments
+# -----------------------------
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --uninstall) UNINSTALL=true ;;
+        --output) OUTPUT_FILE="$2"; shift ;;
+        -h|--help) SHOW_HELP=true ;;
+        *) echo "Unknown parameter: $1"; usage; exit 1 ;;
+    esac
+    shift
+done
+
+if [ "$SHOW_HELP" = true ]; then
+    usage
+    exit 0
+fi
+
+# -----------------------------
+# Get pip-only packages
+# -----------------------------
+PIP_ONLY=$(comm -23 \
+    <(python -m pip freeze | sort) \
+    <(conda list | awk '{print $1"=="$2}' | sort)
+)
+
+# -----------------------------
+# Output results
+# -----------------------------
+if [[ -n "$OUTPUT_FILE" ]]; then
+    echo "$PIP_ONLY" > "$OUTPUT_FILE"
+    echo "Pip-only packages written to $OUTPUT_FILE"
+else
+    echo "Pip-only packages:"
+    echo "$PIP_ONLY"
+fi
+
+# -----------------------------
+# Uninstall if requested
+# -----------------------------
+if [ "$UNINSTALL" = true ] && [ -n "$PIP_ONLY" ]; then
+    echo "Uninstalling pip-only packages..."
+    echo "$PIP_ONLY" | cut -d'=' -f1 | xargs -n1 python -m pip uninstall -y
+    echo "Done."
+fi
