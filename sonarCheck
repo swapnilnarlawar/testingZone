@@ -1,0 +1,17 @@
+sonarqube-check:
+  stage: test
+  script:
+    # Fail fast if not Java 17
+    - java -version
+    - |
+      JAVA_VER=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d. -f1)
+      if [ "$JAVA_VER" -lt 17 ]; then
+        echo "❌ ERROR: Java 17 required for SonarScanner, but found Java $JAVA_VER"
+        exit 1
+      fi
+    # Run Maven build (still compiles with target=1.8 if set in pom.xml)
+    - mvn clean verify
+    - mvn sonar:sonar \
+        -Dsonar.projectKey=$CI_PROJECT_NAME \
+        -Dsonar.host.url=$SONAR_HOST_URL \
+        -Dsonar.login=$SONAR_TOKEN
