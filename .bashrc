@@ -89,23 +89,15 @@ extract() {
 }
 
 # ===================================================================
-# Conda Configuration (Lazy Loading)
+# Conda Configuration
 # ===================================================================
-# Conda is lazy-loaded to improve shell startup time
-# It will initialize only when you first run 'conda' command
+# Initialize conda at shell startup to enable environment display in prompt
+# This adds ~200-500ms to shell startup but ensures conda env names
+# are always visible in the prompt (e.g., (base) or (myenv))
 
-conda() {
-    unset -f conda  # Remove this function wrapper
-    if [ -f '/c/Program Files/choco/miniconda/24.1.2.24031516/Scripts/conda.exe' ]; then
-        # Initialize conda environment for this shell
-        eval "$('/c/Program Files/choco/miniconda/24.1.2.24031516/Scripts/conda.exe' 'shell.bash' 'hook')"
-        # Call conda with the original arguments
-        conda "$@"
-    else
-        echo "Conda not found at expected location"
-        return 1
-    fi
-}
+if [ -f '/c/Program Files/choco/miniconda/24.1.2.24031516/Scripts/conda.exe' ]; then
+    eval "$('/c/Program Files/choco/miniconda/24.1.2.24031516/Scripts/conda.exe' 'shell.bash' 'hook')"
+fi
 
 # ===================================================================
 # Git Prompt Configuration
