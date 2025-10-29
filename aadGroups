@@ -1,28 +1,38 @@
 #!/usr/bin/env bash
 # --------------------------------------------------------------------
-# List Azure AD groups matching a prefix and their members per env
-# Usage: ./list_aad_groups.sh <prefix>
-# Example: ./list_aad_groups.sh abc_edf
+# List Azure AD groups matching a prefix and their members per env,
+# with environment code translation and optional env filtering.
+#
+# Usage:
+#   ./list_aad_groups.sh <prefix> [env]
+# Example:
+#   ./list_aad_groups.sh abc_edf
+#   ./list_aad_groups.sh abc_edf dev
 # --------------------------------------------------------------------
 
 set -euo pipefail
 
 PREFIX=${1:-}
+FILTER_ENV=${2:-""}
 OUTPUT_DIR="./aad_group_reports"
 TABLE_FILE="${OUTPUT_DIR}/aad_groups_table.txt"
 CSV_FILE="${OUTPUT_DIR}/aad_groups.csv"
 
 if [[ -z "$PREFIX" ]]; then
-  echo "Usage: $0 <prefix>"
+  echo "Usage: $0 <prefix> [env]"
+  echo "Example: $0 abc_edf dev"
   exit 1
 fi
 
 mkdir -p "$OUTPUT_DIR"
 
 echo "🔍 Searching Azure AD groups with prefix: $PREFIX"
+if [[ -n "$FILTER_ENV" ]]; then
+  echo "🌍 Filtering for environment: $FILTER_ENV"
+fi
 echo
 
-# Fetch groups with prefix
+# Fetch groups that start with prefix
 groups=$(az ad group list --filter "startswith(displayName,'${PREFIX}')" --query "[].{id:id,displayName:displayName}" -o json)
 
 if [[ $(echo "$groups" | jq length) -eq 0 ]]; then
@@ -30,13 +40,32 @@ if [[ $(echo "$groups" | jq length) -eq 0 ]]; then
   exit 0
 fi
 
-# Prepare header for table and CSV
+# Prepare header
 printf "%-60s %-10s %-40s %-50s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" > "$TABLE_FILE"
 echo "GroupName,Env,MemberDisplayName,UserPrincipalName" > "$CSV_FILE"
 
-# Iterate through groups
+# Function: map environment codes to names
+translate_env() {
+  local code="$1"
+  case "$code" in
+    xyf) echo "dev" ;;
+    xyg) echo "test" ;;
+    xyh) echo "preprod" ;;
+    xyj) echo "prod" ;;
+    *)   echo "unknown" ;;
+  esac
+}
+
+# Loop over groups
 echo "$groups" | jq -r '.[] | [.id, .displayName] | @tsv' | while IFS=$'\t' read -r groupId groupName; do
-  env=$(echo "$groupName" | grep -oE '(_dev_|_test_|_prod_)' | tr -d '_' || echo "unknown")
+  # Extract environment code (xyf, xyg, xyh, xyj)
+  envCode=$(echo "$groupName" | grep -oE 'xy[fghj]' || echo "unknown")
+  envName=$(translate_env "$envCode")
+
+  # Skip if environment filter doesn't match
+  if [[ -n "$FILTER_ENV" && "$FILTER_ENV" != "$envName" ]]; then
+    continue
+  fi
 
   # Get members
   members=$(az ad group member list --group "$groupId" --query "[].{displayName:displayName,userPrincipalName:userPrincipalName}" -o json)
@@ -44,18 +73,18 @@ echo "$groups" | jq -r '.[] | [.id, .displayName] | @tsv' | while IFS=$'\t' read
 
   echo "------------------------------------------------------------"
   echo "📘 Group: $groupName"
-  echo "🌍 Environment: $env"
+  echo "🌍 Environment: $envName"
   echo "👥 Members ($memberCount):"
 
   if [[ "$memberCount" -gt 0 ]]; then
     echo "$members" | jq -r '.[] | [.displayName, .userPrincipalName] | @tsv' | while IFS=$'\t' read -r displayName upn; do
-      printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$env" "$displayName" "$upn" >> "$TABLE_FILE"
-      echo "\"$groupName\",\"$env\",\"$displayName\",\"$upn\"" >> "$CSV_FILE"
+      printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "$displayName" "$upn" >> "$TABLE_FILE"
+      echo "\"$groupName\",\"$envName\",\"$displayName\",\"$upn\"" >> "$CSV_FILE"
       echo " - $displayName ($upn)"
     done
   else
-    printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$env" "No members" "-" >> "$TABLE_FILE"
-    echo "\"$groupName\",\"$env\",\"No members\",\"-\"" >> "$CSV_FILE"
+    printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "No members" "-" >> "$TABLE_FILE"
+    echo "\"$groupName\",\"$envName\",\"No members\",\"-\"" >> "$CSV_FILE"
     echo "   (none)"
   fi
   echo
