@@ -150,15 +150,23 @@ echo 0 > "$PROGRESS_FILE"
 export TABLE_FILE CSV_FILE FILTER_ENV PROGRESS_FILE TOTAL_GROUPS SKIP_WORDS TMP_DIR PREFIX DATE_STR
 
 # -------------------------
-# Process groups in parallel
+# Process groups in parallel (safe defaults for optional args)
 # -------------------------
 cat "$TMP_GROUPS" | xargs -L1 -P"$PARALLEL" bash -c '
 groupId="$0"
 groupName="$1"
+TMP_DIR="$2"
+PREFIX="$3"
+DATE_STR="$4"
+SKIP_WORDS="${5:-}"
+FILTER_ENV="${6:-}"
 
-# Skip words (redundant safety)
+LOG_FILE="${TMP_DIR}/${PREFIX}_log_${groupName}_${DATE_STR}.txt"
+
+# Skip words (optional)
 if [[ -n "$SKIP_WORDS" ]]; then
-    for word in $(echo "$SKIP_WORDS" | tr "," " "); do
+    IFS="," read -ra words <<< "$SKIP_WORDS"
+    for word in "${words[@]}"; do
         if [[ "${groupName,,}" == *"${word,,}"* ]]; then
             echo "Skipping group $groupName due to skip word: $word"
             exit 0
@@ -171,7 +179,7 @@ envCode=$(echo "$groupName" | sed -nE "s/.*-(${ENV_CODES_REGEX})_.*/\1/p" | head
 [[ -z "$envCode" ]] && envCode="unknown"
 envName=$(translate_env "$envCode")
 
-# Env filter
+# Env filter (optional)
 if [[ -n "$FILTER_ENV" && "${FILTER_ENV,,}" != "${envName,,}" ]]; then
     exit 0
 fi
@@ -185,27 +193,26 @@ count=$(($(cat "'"$PROGRESS_FILE"'") + 1))
 echo "$count" > "'"$PROGRESS_FILE"'"
 echo "Processing group $count / $TOTAL_GROUPS: $groupName"
 
-LOG_FILE="${TMP_DIR}/${PREFIX}_log_${envName}_${DATE_STR}.txt"
-
 {
-    echo "------------------------------------------------------------"
-    echo "📘 Group: $groupName"
-    echo "🌍 Environment: $envName"
-    echo "👥 Members ($memberCount):"
+    printf "%s\n" "------------------------------------------------------------"
+    printf "📘 Group: %s\n" "$groupName"
+    printf "🌍 Environment: %s\n" "$envName"
+    printf "👥 Members (%d):\n" "$memberCount"
 
     if [[ "$memberCount" -gt 0 ]]; then
         echo "$members" | jq -r ".[] | [.displayName, .userPrincipalName] | @tsv" | while IFS=$'\t' read -r displayName upn; do
             printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "$displayName" "$upn" >> "'"$TABLE_FILE"'"
             echo "\"$groupName\",\"$envName\",\"$displayName\",\"$upn\"" >> "'"$CSV_FILE"'"
-            echo " - $displayName ($upn)"
+            printf " - %s (%s)\n" "$displayName" "$upn"
         done
     else
         printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "No members" "-" >> "'"$TABLE_FILE"'"
         echo "\"$groupName\",\"$envName\",\"No members\",\"-\"" >> "'"$CSV_FILE"'"
-        echo "   (none)"
+        printf "   (none)\n"
     fi
 } >> "$LOG_FILE" 2>&1
-'
+' _ {} "$TMP_DIR" "$PREFIX" "$DATE_STR" "${SKIP_WORDS:-}" "${FILTER_ENV:-}"
+
 
 # -------------------------
 # Clean up temp files
