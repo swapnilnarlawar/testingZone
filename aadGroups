@@ -1,24 +1,19 @@
 #!/usr/bin/env bash
 # --------------------------------------------------------------------
 # List Azure AD groups matching a prefix and their members per environment,
-# with optional filtering, parallelized lookups, skip-word filter, 
-# live progress, table/CSV export, consolidated logs, and prefix+date log names.
+# with optional filtering, parallelized lookups, skip-word filter,
+# dynamic env code mapping from ENV_MAP, table/CSV export, and logs.
 #
 # Usage:
 #   ./list_aad_groups.sh <prefix> [env] [parallelism] [skip_words] [env_map]
+#
 # Arguments:
 #   prefix        Required. Group prefix to search for.
-#   env           Optional. Environment to filter (case-insensitive: dev/test/preprod/prod)
+#   env           Optional. Environment to filter (case-insensitive)
 #   parallelism   Optional. Number of parallel jobs (default 5)
 #   skip_words    Optional. Comma-separated words to skip groups containing them
 #   env_map       Optional. Comma-separated mapping string, e.g.
 #                 "xyf:dev,xyg:test,xyh:preprod,xyj:prod"
-#
-# Examples:
-#   ./list_aad_groups.sh abc_edf
-#   ./list_aad_groups.sh abc_edf dev
-#   ./list_aad_groups.sh abc_edf "" 10 TEST,DEMO
-#   ./list_aad_groups.sh abc_edf dev 5 "" "xyf:development,xyg:testing,xyh:staging,xyj:production"
 # --------------------------------------------------------------------
 
 set -euo pipefail
@@ -28,43 +23,14 @@ set -euo pipefail
 # -------------------------
 PREFIX=${1:?Error: prefix required}
 
-# 2nd arg: FILTER_ENV (can be empty)
-if [[ $# -ge 2 ]]; then
-    FILTER_ENV="$2"
-else
-    FILTER_ENV=""
-fi
+FILTER_ENV=${2:-""}
+PARALLEL=${3:-5}
+SKIP_WORDS=${4:-""}
+ENV_MAP=${5:-"xyf:dev,xyg:test,xyh:preprod,xyj:prod"}
 
-# 3rd arg: PARALLEL
-if [[ $# -ge 3 && -n "$3" ]]; then
-    PARALLEL="$3"
-else
-    PARALLEL=5
-fi
-
-# 4th arg: SKIP_WORDS
-if [[ $# -ge 4 && -n "$4" ]]; then
-    SKIP_WORDS="$4"
-else
-    SKIP_WORDS=""
-fi
-
-# 5th arg: ENV_MAP
-if [[ $# -ge 5 && -n "$5" ]]; then
-    ENV_MAP="$5"
-else
-    ENV_MAP="xyf:dev,xyg:test,xyh:preprod,xyj:prod"
-fi
-
-
-# Validate prefix
-if [[ -z "$PREFIX" ]]; then
-    echo "Usage: $0 <prefix> [env] [parallelism] [skip_words] [env_map]"
-    echo "Example: $0 abc_edf dev 5 TEST,DEMO xyf:dev,xyg:test,xyh:preprod,xyj:prod"
-    exit 1
-fi
-
+# -------------------------
 # Output directories and files
+# -------------------------
 OUTPUT_DIR="./aad_group_reports"
 TMP_DIR="${OUTPUT_DIR}/tmp_logs"
 mkdir -p "$OUTPUT_DIR" "$TMP_DIR"
@@ -77,7 +43,7 @@ CSV_FILE="${OUTPUT_DIR}/${PREFIX}_aad_groups_${DATE_STR}.csv"
 # -------------------------
 # Pre-flight checks
 # -------------------------
-for cmd in az jq xargs awk; do
+for cmd in az jq xargs awk sed; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "❌ Required command '$cmd' not found. Please install."
         exit 1
@@ -88,12 +54,8 @@ done
 # Header output
 # -------------------------
 echo "🔍 Searching Azure AD groups with prefix: $PREFIX"
-if [[ -n "$FILTER_ENV" ]]; then
-    echo "🌍 Filtering for environment: $FILTER_ENV (case-insensitive)"
-fi
-if [[ -n "$SKIP_WORDS" ]]; then
-    echo "🚫 Skipping groups containing words: $SKIP_WORDS"
-fi
+[[ -n "$FILTER_ENV" ]] && echo "🌍 Filtering for environment: $FILTER_ENV (case-insensitive)"
+[[ -n "$SKIP_WORDS" ]] && echo "🚫 Skipping groups containing words: $SKIP_WORDS"
 echo "⚡ Parallelism: $PARALLEL"
 echo "🗺 Env mapping: $ENV_MAP"
 echo
@@ -103,12 +65,11 @@ echo
 # -------------------------
 groups=$(az ad group list --filter "startswith(displayName,'${PREFIX}')" --query "[].{id:id,displayName:displayName}" -o json)
 
-# Temp file with groupId<TAB>displayName
-TMP_GROUPS="/tmp/aad_groups_$$.txt"
+TMP_GROUPS="${TMP_DIR}/aad_groups_$$.txt"
 echo "$groups" | jq -r '.[] | [.id, .displayName] | @tsv' > "$TMP_GROUPS"
 
 # -------------------------
-# Function: translate env code (configurable mapping)
+# Function: translate env code
 # -------------------------
 translate_env() {
     local code="$1"
@@ -126,11 +87,35 @@ export -f translate_env
 export ENV_MAP
 
 # -------------------------
-# Filter groups by env (case-insensitive) and compute TOTAL_GROUPS
+# Derive env codes dynamically from ENV_MAP
+# -------------------------
+ENV_CODES_REGEX=$(echo "$ENV_MAP" | awk -F, '{for(i=1;i<=NF;i++){split($i,k,":"); codes=codes k[1]}} END{gsub(/ /,"",codes); print codes}' | sed 's/./&|/g' | sed 's/|$//')
+export ENV_CODES_REGEX
+
+# -------------------------
+# Apply skip-word filter if present
+# -------------------------
+if [[ -n "$SKIP_WORDS" ]]; then
+    TMP_GROUPS_FILTERED_SKIP="${TMP_DIR}/aad_groups_skip_$$.txt"
+    awk -v skip="$SKIP_WORDS" '
+    BEGIN { n = split(skip, words, ",") }
+    {
+        skip_group=0
+        for(i=1;i<=n;i++){
+            w=words[i]
+            if(tolower($2) ~ tolower(w)) skip_group=1
+        }
+        if(skip_group==0) print $0
+    }' "$TMP_GROUPS" > "$TMP_GROUPS_FILTERED_SKIP"
+    TMP_GROUPS="$TMP_GROUPS_FILTERED_SKIP"
+fi
+
+# -------------------------
+# Apply environment filter if FILTER_ENV is specified
 # -------------------------
 if [[ -n "$FILTER_ENV" ]]; then
-    TMP_GROUPS_FILTERED="/tmp/aad_groups_filtered_$$.txt"
-    awk -v env="$FILTER_ENV" -v env_map="$ENV_MAP" '
+    TMP_GROUPS_FILTERED_ENV="${TMP_DIR}/aad_groups_env_$$.txt"
+    awk -v env="$FILTER_ENV" -v env_map="$ENV_MAP" -v regex_codes="$ENV_CODES_REGEX" '
     function translate(code, env_map) {
         n = split(env_map, arr, ",")
         for(i=1;i<=n;i++){
@@ -140,19 +125,18 @@ if [[ -n "$FILTER_ENV" ]]; then
         return "unknown"
     }
     {
-        envCode="";
-        if($2 ~ /-([xyfghj]{3})_/) {
-            match($2, /-([xyfghj]{3})_/, a)
-            envCode=a[1]
-        }
+        envCode=""
+        regex="-((" regex_codes ")){1}_"
+        if($2 ~ regex) { match($2, regex, a); envCode=a[1] }
         if(tolower(translate(envCode, env_map))==tolower(env)) print $0
-    }' "$TMP_GROUPS" > "$TMP_GROUPS_FILTERED"
-    TOTAL_GROUPS=$(wc -l < "$TMP_GROUPS_FILTERED")
-    TMP_GROUPS="$TMP_GROUPS_FILTERED"
-else
-    TOTAL_GROUPS=$(wc -l < "$TMP_GROUPS")
+    }' "$TMP_GROUPS" > "$TMP_GROUPS_FILTERED_ENV"
+    TMP_GROUPS="$TMP_GROUPS_FILTERED_ENV"
 fi
 
+# -------------------------
+# Count total groups
+# -------------------------
+TOTAL_GROUPS=$(wc -l < "$TMP_GROUPS")
 echo "Total groups to process: $TOTAL_GROUPS"
 
 # -------------------------
@@ -161,10 +145,10 @@ echo "Total groups to process: $TOTAL_GROUPS"
 printf "%-60s %-10s %-40s %-50s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" > "$TABLE_FILE"
 echo "GroupName,Env,MemberDisplayName,UserPrincipalName" > "$CSV_FILE"
 
-PROGRESS_FILE="/tmp/progress_$$.txt"
+PROGRESS_FILE="${TMP_DIR}/progress_$$.txt"
 echo 0 > "$PROGRESS_FILE"
 
-export OUTPUT_DIR TABLE_FILE CSV_FILE FILTER_ENV PROGRESS_FILE TOTAL_GROUPS SKIP_WORDS TMP_DIR PREFIX DATE_STR
+export TABLE_FILE CSV_FILE FILTER_ENV PROGRESS_FILE TOTAL_GROUPS SKIP_WORDS TMP_DIR PREFIX DATE_STR
 
 # -------------------------
 # Process groups in parallel
@@ -173,7 +157,7 @@ cat "$TMP_GROUPS" | xargs -L1 -P"$PARALLEL" bash -c '
 groupId="$0"
 groupName="$1"
 
-# Skip words
+# Skip words (redundant safety)
 if [[ -n "$SKIP_WORDS" ]]; then
     for word in $(echo "$SKIP_WORDS" | tr "," " "); do
         if [[ "${groupName,,}" == *"${word,,}"* ]]; then
@@ -184,11 +168,11 @@ if [[ -n "$SKIP_WORDS" ]]; then
 fi
 
 # Env translation
-envCode=$(echo "$groupName" | sed -nE "s/.*-([xyfghj]{3})_.*/\1/p" | head -n1)
+envCode=$(echo "$groupName" | sed -nE "s/.*-(${ENV_CODES_REGEX})_.*/\1/p" | head -n1)
 [[ -z "$envCode" ]] && envCode="unknown"
 envName=$(translate_env "$envCode")
 
-# Env filter (case-insensitive)
+# Env filter
 if [[ -n "$FILTER_ENV" && "${FILTER_ENV,,}" != "${envName,,}" ]]; then
     exit 0
 fi
@@ -227,7 +211,7 @@ LOG_FILE="${TMP_DIR}/${PREFIX}_log_${envName}_${DATE_STR}.txt"
 # -------------------------
 # Clean up temp files
 # -------------------------
-rm -f "$TMP_GROUPS" "$TMP_GROUPS_FILTERED" "$PROGRESS_FILE"
+rm -f "$TMP_DIR"/aad_groups_* "$PROGRESS_FILE"
 
 # -------------------------
 # Consolidate logs
