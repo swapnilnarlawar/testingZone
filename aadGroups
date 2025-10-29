@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
 # --------------------------------------------------------------------
 # List Azure AD groups matching a prefix and their members per env,
-# with environment code translation and optional env filtering.
+# with environment code translation, optional env filtering,
+# parallelized member lookups, live progress indicator,
+# consolidated log, and configurable parallelism.
 #
 # Usage:
-#   ./list_aad_groups.sh <prefix> [env]
+#   ./list_aad_groups.sh <prefix> [env] [parallelism]
 # Example:
 #   ./list_aad_groups.sh abc_edf
 #   ./list_aad_groups.sh abc_edf dev
+#   ./list_aad_groups.sh abc_edf dev 10
 # --------------------------------------------------------------------
 
 set -euo pipefail
 
 PREFIX=${1:-}
 FILTER_ENV=${2:-""}
+PARALLEL=${3:-5}  # Default parallelism: 5
+
 OUTPUT_DIR="./aad_group_reports"
 TABLE_FILE="${OUTPUT_DIR}/aad_groups_table.txt"
 CSV_FILE="${OUTPUT_DIR}/aad_groups.csv"
 
 if [[ -z "$PREFIX" ]]; then
-  echo "Usage: $0 <prefix> [env]"
-  echo "Example: $0 abc_edf dev"
+  echo "Usage: $0 <prefix> [env] [parallelism]"
+  echo "Example: $0 abc_edf dev 10"
   exit 1
 fi
 
@@ -30,21 +35,32 @@ echo "🔍 Searching Azure AD groups with prefix: $PREFIX"
 if [[ -n "$FILTER_ENV" ]]; then
   echo "🌍 Filtering for environment: $FILTER_ENV"
 fi
+echo "⚡ Using parallelism: $PARALLEL"
 echo
 
-# Fetch groups that start with prefix
+# Fetch groups
 groups=$(az ad group list --filter "startswith(displayName,'${PREFIX}')" --query "[].{id:id,displayName:displayName}" -o json)
 
-if [[ $(echo "$groups" | jq length) -eq 0 ]]; then
+TOTAL_GROUPS=$(echo "$groups" | jq length)
+echo "Total groups found: $TOTAL_GROUPS"
+if [[ "$TOTAL_GROUPS" -eq 0 ]]; then
   echo "❌ No groups found with prefix '${PREFIX}'"
   exit 0
 fi
 
-# Prepare header
+# Prepare output headers
 printf "%-60s %-10s %-40s %-50s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" > "$TABLE_FILE"
 echo "GroupName,Env,MemberDisplayName,UserPrincipalName" > "$CSV_FILE"
 
-# Function: map environment codes to names
+# Create temp file with group info
+TMP_GROUPS="/tmp/aad_groups_$$.txt"
+echo "$groups" | jq -r '.[] | [.id, .displayName] | @tsv' > "$TMP_GROUPS"
+
+# Create progress file
+PROGRESS_FILE="/tmp/progress_$$.txt"
+echo 0 > "$PROGRESS_FILE"
+
+# Function to translate env code to name
 translate_env() {
   local code="$1"
   case "$code" in
@@ -55,41 +71,63 @@ translate_env() {
     *)   echo "unknown" ;;
   esac
 }
+export -f translate_env
+export OUTPUT_DIR TABLE_FILE CSV_FILE FILTER_ENV PROGRESS_FILE TOTAL_GROUPS
 
-# Loop over groups
-echo "$groups" | jq -r '.[] | [.id, .displayName] | @tsv' | while IFS=$'\t' read -r groupId groupName; do
-  # Extract environment code (xyf, xyg, xyh, xyj)
-  envCode=$(echo "$groupName" | grep -oE 'xy[fghj]' || echo "unknown")
-  envName=$(translate_env "$envCode")
+# Parallel processing
+cat "$TMP_GROUPS" | xargs -L1 -P"$PARALLEL" bash -c '
+groupId="$0"
+groupName="$1"
 
-  # Skip if environment filter doesn't match
-  if [[ -n "$FILTER_ENV" && "$FILTER_ENV" != "$envName" ]]; then
-    continue
-  fi
+# Extract env code like -xyf_
+envCode=$(echo "$groupName" | sed -nE "s/.*-([xyfghj]{3})_.*/\1/p" | head -n1)
+[[ -z "$envCode" ]] && envCode="unknown"
+envName=$(translate_env "$envCode")
 
-  # Get members
-  members=$(az ad group member list --group "$groupId" --query "[].{displayName:displayName,userPrincipalName:userPrincipalName}" -o json)
-  memberCount=$(echo "$members" | jq length)
+# Apply environment filter
+if [[ -n "$FILTER_ENV" && "$FILTER_ENV" != "$envName" ]]; then
+  exit 0
+fi
 
+# Get members
+members=$(az ad group member list --group "$groupId" --query "[].{displayName:displayName,userPrincipalName:userPrincipalName}" -o json)
+memberCount=$(echo "$members" | jq length)
+
+# Update and show progress
+count=$(($(cat "'"$PROGRESS_FILE"'") + 1))
+echo "$count" > "'"$PROGRESS_FILE"'"
+echo "Processing group $count / $TOTAL_GROUPS: $groupName"
+
+{
   echo "------------------------------------------------------------"
   echo "📘 Group: $groupName"
   echo "🌍 Environment: $envName"
   echo "👥 Members ($memberCount):"
 
   if [[ "$memberCount" -gt 0 ]]; then
-    echo "$members" | jq -r '.[] | [.displayName, .userPrincipalName] | @tsv' | while IFS=$'\t' read -r displayName upn; do
-      printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "$displayName" "$upn" >> "$TABLE_FILE"
-      echo "\"$groupName\",\"$envName\",\"$displayName\",\"$upn\"" >> "$CSV_FILE"
+    echo "$members" | jq -r ".[] | [.displayName, .userPrincipalName] | @tsv" | while IFS=$'\t' read -r displayName upn; do
+      printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "$displayName" "$upn" >> "'"$TABLE_FILE"'"
+      echo "\"$groupName\",\"$envName\",\"$displayName\",\"$upn\"" >> "'"$CSV_FILE"'"
       echo " - $displayName ($upn)"
     done
   else
-    printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "No members" "-" >> "$TABLE_FILE"
-    echo "\"$groupName\",\"$envName\",\"No members\",\"-\"" >> "$CSV_FILE"
+    printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "No members" "-" >> "'"$TABLE_FILE"'"
+    echo "\"$groupName\",\"$envName\",\"No members\",\"-\"" >> "'"$CSV_FILE"'"
     echo "   (none)"
   fi
-  echo
-done
+} >> "'"$OUTPUT_DIR"'/log_${envName}.txt" 2>&1
+'
 
+# Clean up temp files
+rm -f "$TMP_GROUPS" "$PROGRESS_FILE"
+
+# Combine all per-env logs into a single consolidated log
+FINAL_LOG="${OUTPUT_DIR}/aad_groups_full.log"
+cat "${OUTPUT_DIR}"/log_*.txt > "$FINAL_LOG" 2>/dev/null || true
+rm -f "${OUTPUT_DIR}"/log_*.txt  # remove individual logs
+
+echo
 echo "✅ Report complete!"
 echo "📄 Table format saved at: $TABLE_FILE"
 echo "📊 CSV format saved at:   $CSV_FILE"
+echo "📝 Full consolidated log saved at: $FINAL_LOG"
