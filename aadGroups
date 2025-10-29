@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# --------------------------------------------------------------------
+# List Azure AD groups matching a prefix and their members per env
+# Usage: ./list_aad_groups.sh <prefix>
+# Example: ./list_aad_groups.sh abc_edf
+# --------------------------------------------------------------------
+
+set -euo pipefail
+
+PREFIX=${1:-}
+OUTPUT_DIR="./aad_group_reports"
+TABLE_FILE="${OUTPUT_DIR}/aad_groups_table.txt"
+CSV_FILE="${OUTPUT_DIR}/aad_groups.csv"
+
+if [[ -z "$PREFIX" ]]; then
+  echo "Usage: $0 <prefix>"
+  exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+echo "🔍 Searching Azure AD groups with prefix: $PREFIX"
+echo
+
+# Fetch groups with prefix
+groups=$(az ad group list --filter "startswith(displayName,'${PREFIX}')" --query "[].{id:id,displayName:displayName}" -o json)
+
+if [[ $(echo "$groups" | jq length) -eq 0 ]]; then
+  echo "❌ No groups found with prefix '${PREFIX}'"
+  exit 0
+fi
+
+# Prepare header for table and CSV
+printf "%-60s %-10s %-40s %-50s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" > "$TABLE_FILE"
+echo "GroupName,Env,MemberDisplayName,UserPrincipalName" > "$CSV_FILE"
+
+# Iterate through groups
+echo "$groups" | jq -r '.[] | [.id, .displayName] | @tsv' | while IFS=$'\t' read -r groupId groupName; do
+  env=$(echo "$groupName" | grep -oE '(_dev_|_test_|_prod_)' | tr -d '_' || echo "unknown")
+
+  # Get members
+  members=$(az ad group member list --group "$groupId" --query "[].{displayName:displayName,userPrincipalName:userPrincipalName}" -o json)
+  memberCount=$(echo "$members" | jq length)
+
+  echo "------------------------------------------------------------"
+  echo "📘 Group: $groupName"
+  echo "🌍 Environment: $env"
+  echo "👥 Members ($memberCount):"
+
+  if [[ "$memberCount" -gt 0 ]]; then
+    echo "$members" | jq -r '.[] | [.displayName, .userPrincipalName] | @tsv' | while IFS=$'\t' read -r displayName upn; do
+      printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$env" "$displayName" "$upn" >> "$TABLE_FILE"
+      echo "\"$groupName\",\"$env\",\"$displayName\",\"$upn\"" >> "$CSV_FILE"
+      echo " - $displayName ($upn)"
+    done
+  else
+    printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$env" "No members" "-" >> "$TABLE_FILE"
+    echo "\"$groupName\",\"$env\",\"No members\",\"-\"" >> "$CSV_FILE"
+    echo "   (none)"
+  fi
+  echo
+done
+
+echo "✅ Report complete!"
+echo "📄 Table format saved at: $TABLE_FILE"
+echo "📊 CSV format saved at:   $CSV_FILE"
