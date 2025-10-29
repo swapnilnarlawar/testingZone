@@ -201,3 +201,21 @@ echo "✅ Report complete!"
 echo "📄 Table format saved at: $TABLE_FILE"
 echo "📊 CSV format saved at:   $CSV_FILE"
 echo "📝 Full consolidated log saved at: $FINAL_LOG"
+
+
+if [[ -n "$FILTER_ENV" ]]; then
+    groups=$(echo "$groups" | jq -r '
+        map(select(
+            (.displayName | capture("-(?<env>[xyfghj]{3})_")) |
+            .env as $code |
+            ($code=="xyf" and env=="dev") or
+            ($code=="xyg" and env=="test") or
+            ($code=="xyh" and env=="preprod") or
+            ($code=="xyj" and env=="prod") or
+            (env=="unknown" and $code==null)
+        )
+    )')
+fi
+
+TOTAL_GROUPS=$(echo "$groups" | jq length)
+
