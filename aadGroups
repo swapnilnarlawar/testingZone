@@ -3,17 +3,6 @@
 # List Azure AD groups matching a prefix and their members per environment,
 # with optional filtering, parallelized lookups, skip-word filter,
 # dynamic env code mapping from ENV_MAP, table/CSV export, and logs.
-#
-# Usage:
-#   ./list_aad_groups.sh <prefix> [env] [parallelism] [skip_words] [env_map]
-#
-# Arguments:
-#   prefix        Required. Group prefix to search for.
-#   env           Optional. Environment to filter (case-insensitive)
-#   parallelism   Optional. Number of parallel jobs (default 5)
-#   skip_words    Optional. Comma-separated words to skip groups containing them
-#   env_map       Optional. Comma-separated mapping string, e.g.
-#                 "xyf:dev,xyg:test,xyh:preprod,xyj:prod"
 # --------------------------------------------------------------------
 
 set -euo pipefail
@@ -89,7 +78,17 @@ export ENV_MAP
 # -------------------------
 # Derive env codes dynamically from ENV_MAP
 # -------------------------
-ENV_CODES_REGEX=$(echo "$ENV_MAP" | awk -F, '{for(i=1;i<=NF;i++){split($i,k,":"); codes=codes k[1]}} END{gsub(/ /,"",codes); print codes}' | sed 's/./&|/g' | sed 's/|$//')
+ENV_CODES_REGEX=$(echo "$ENV_MAP" | awk -F, '{
+    for(i=1;i<=NF;i++){
+        split($i,k,":");
+        codes[i]=k[1]
+    }
+    for(i=1;i<=NF;i++){
+        printf "%s", codes[i]
+        if(i<NF) printf "|"
+    }
+    print ""
+}')
 export ENV_CODES_REGEX
 
 # -------------------------
