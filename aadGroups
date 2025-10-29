@@ -141,11 +141,14 @@ echo "Total groups to process: $TOTAL_GROUPS"
 # -------------------------
 # Initialize output files
 # -------------------------
-printf "%-60s %-10s %-40s %-50s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" > "$TABLE_FILE"
-echo "GroupName,Env,MemberDisplayName,UserPrincipalName" > "$CSV_FILE"
+printf "%-60s %-10s %-40s %-50 %-15s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" "ObjectType" > "$TABLE_FILE"
+echo "GroupName,Env,MemberDisplayName,UserPrincipalName,ObjectType" > "$CSV_FILE"
 
 PROGRESS_FILE="${TMP_DIR}/progress_$$.txt"
 echo 0 > "$PROGRESS_FILE"
+
+PROGRESS_FILE_TMP="${TMP_DIR}/progress_tmp_$$.txt"
+touch "$PROGRESS_FILE_TMP"
 
 export TABLE_FILE CSV_FILE FILTER_ENV PROGRESS_FILE TOTAL_GROUPS SKIP_WORDS TMP_DIR PREFIX DATE_STR
 
@@ -155,13 +158,6 @@ export TABLE_FILE CSV_FILE FILTER_ENV PROGRESS_FILE TOTAL_GROUPS SKIP_WORDS TMP_
 cat "$TMP_GROUPS" | xargs -L1 -P"$PARALLEL" bash -c '
 groupId="$0"
 groupName="$1"
-TMP_DIR="$2"
-PREFIX="$3"
-DATE_STR="$4"
-SKIP_WORDS="${5:-}"
-FILTER_ENV="${6:-}"
-
-LOG_FILE="${TMP_DIR}/${PREFIX}_log_${groupName}_${DATE_STR}.txt"
 
 # Skip words (optional)
 if [[ -n "$SKIP_WORDS" ]]; then
@@ -189,9 +185,11 @@ members=$(az ad group member list --group "$groupId" --query "[].{displayName:di
 memberCount=$(echo "$members" | jq length)
 
 # Progress
-count=$(($(cat "'"$PROGRESS_FILE"'") + 1))
-echo "$count" > "'"$PROGRESS_FILE"'"
-echo "Processing group $count / $TOTAL_GROUPS: $groupName"
+current=$(($(wc -l < "'"$PROGRESS_FILE_TMP"'") + 1))
+echo "$groupName" >> "'"$PROGRESS_FILE_TMP"'"
+echo "Processing group $current / $TOTAL_GROUPS: $groupName"
+
+LOG_FILE="${TMP_DIR}/${PREFIX}_log_${groupName}_${DATE_STR}.txt"
 
 {
     printf "%s\n" "------------------------------------------------------------"
@@ -201,8 +199,8 @@ echo "Processing group $count / $TOTAL_GROUPS: $groupName"
 
     if [[ "$memberCount" -gt 0 ]]; then
         echo "$members" | jq -r ".[] | [.displayName, .userPrincipalName] | @tsv" | while IFS=$'\t' read -r displayName upn; do
-            printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "$displayName" "$upn" >> "'"$TABLE_FILE"'"
-            echo "\"$groupName\",\"$envName\",\"$displayName\",\"$upn\"" >> "'"$CSV_FILE"'"
+            printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "$displayName" "$id" "$objectType" >> "'"$TABLE_FILE"'"
+            echo "\"$groupName\",\"$envName\",\"$displayName\",\"$id\",\"$objectType\"" >> "'"$CSV_FILE"'"
             printf " - %s (%s)\n" "$displayName" "$upn"
         done
     else
