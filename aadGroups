@@ -141,8 +141,8 @@ echo "Total groups to process: $TOTAL_GROUPS"
 # -------------------------
 # Initialize output files
 # -------------------------
-printf "%-60s %-10s %-40s %-50 %-15s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" "ObjectType" > "$TABLE_FILE"
-echo "GroupName,Env,MemberDisplayName,UserPrincipalName,ObjectType" > "$CSV_FILE"
+printf "%-60s %-10s %-40s %-50s %-15s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" "ObjectType" > "$TABLE_FILE"
+echo "GroupName,Env,MemberDisplayName,UserPrincipalName,ObjectId,ObjectType" > "$CSV_FILE"
 
 PROGRESS_FILE="${TMP_DIR}/progress_$$.txt"
 echo 0 > "$PROGRESS_FILE"
@@ -180,8 +180,9 @@ if [[ -n "$FILTER_ENV" && "${FILTER_ENV,,}" != "${envName,,}" ]]; then
     exit 0
 fi
 
-# Fetch members
-members=$(az ad group member list --group "$groupId" --query "[].{displayName:displayName,userPrincipalName:userPrincipalName}" -o json)
+# Fetch members with all necessary fields including SPNs and UAMIs
+# Using --query to get id, displayName, userPrincipalName, servicePrincipalNames, and odatatype
+members=$(az ad group member list --group "$groupId" --query "[].{id:id,displayName:displayName,userPrincipalName:userPrincipalName,odatatype:\"@odata.type\"}" -o json)
 memberCount=$(echo "$members" | jq length)
 
 # Progress
@@ -198,14 +199,17 @@ LOG_FILE="${TMP_DIR}/${PREFIX}_log_${groupName}_${DATE_STR}.txt"
     printf "👥 Members (%d):\n" "$memberCount"
 
     if [[ "$memberCount" -gt 0 ]]; then
-        echo "$members" | jq -r ".[] | [.displayName, .userPrincipalName] | @tsv" | while IFS=$'\t' read -r displayName upn; do
-            printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "$displayName" "$id" "$objectType" >> "'"$TABLE_FILE"'"
-            echo "\"$groupName\",\"$envName\",\"$displayName\",\"$id\",\"$objectType\"" >> "'"$CSV_FILE"'"
-            printf " - %s (%s)\n" "$displayName" "$upn"
+        echo "$members" | jq -r ".[] | [.displayName // \"N/A\", .userPrincipalName // \"N/A\", .id // \"N/A\", .odatatype // \"N/A\"] | @tsv" | while IFS=$'\t' read -r displayName upn id objectType; do
+            # Clean up object type to be more readable
+            objectType=$(echo "$objectType" | sed "s|#microsoft.graph.||")
+            
+            printf "%-60s %-10s %-40s %-50s %-15s\n" "$groupName" "$envName" "$displayName" "$upn" "$objectType" >> "'"$TABLE_FILE"'"
+            echo "\"$groupName\",\"$envName\",\"$displayName\",\"$upn\",\"$id\",\"$objectType\"" >> "'"$CSV_FILE"'"
+            printf " - %s (%s) [%s] [%s]\n" "$displayName" "$upn" "$id" "$objectType"
         done
     else
-        printf "%-60s %-10s %-40s %-50s\n" "$groupName" "$envName" "No members" "-" >> "'"$TABLE_FILE"'"
-        echo "\"$groupName\",\"$envName\",\"No members\",\"-\"" >> "'"$CSV_FILE"'"
+        printf "%-60s %-10s %-40s %-50s %-15s\n" "$groupName" "$envName" "No members" "-" "-" >> "'"$TABLE_FILE"'"
+        echo "\"$groupName\",\"$envName\",\"No members\",\"-\",\"-\",\"-\"" >> "'"$CSV_FILE"'"
         printf "   (none)\n"
     fi
 } >> "$LOG_FILE" 2>&1
