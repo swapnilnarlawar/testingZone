@@ -26,23 +26,36 @@ set -euo pipefail
 # -------------------------
 # Argument parsing
 # -------------------------
-PREFIX=${1:-}
-SECOND_ARG=${2:-""}
-THIRD_ARG=${3:-""}
-FOURTH_ARG=${4:-""}
-FIFTH_ARG=${5:-""}
+PREFIX=${1:?Error: prefix required}
 
-# Determine FILTER_ENV and PARALLEL
-if [[ "$SECOND_ARG" =~ ^[0-9]+$ ]]; then
-    FILTER_ENV=""
-    PARALLEL=$SECOND_ARG
+# 2nd arg: FILTER_ENV (can be empty)
+if [[ $# -ge 2 ]]; then
+    FILTER_ENV="$2"
 else
-    FILTER_ENV=$SECOND_ARG
-    PARALLEL=${THIRD_ARG:-5}
+    FILTER_ENV=""
 fi
 
-SKIP_WORDS=$FOURTH_ARG
-ENV_MAP=${FIFTH_ARG:-"xyf:dev,xyg:test,xyh:preprod,xyj:prod"}
+# 3rd arg: PARALLEL
+if [[ $# -ge 3 && -n "$3" ]]; then
+    PARALLEL="$3"
+else
+    PARALLEL=5
+fi
+
+# 4th arg: SKIP_WORDS
+if [[ $# -ge 4 && -n "$4" ]]; then
+    SKIP_WORDS="$4"
+else
+    SKIP_WORDS=""
+fi
+
+# 5th arg: ENV_MAP
+if [[ $# -ge 5 && -n "$5" ]]; then
+    ENV_MAP="$5"
+else
+    ENV_MAP="xyf:dev,xyg:test,xyh:preprod,xyj:prod"
+fi
+
 
 # Validate prefix
 if [[ -z "$PREFIX" ]]; then
