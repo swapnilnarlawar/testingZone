@@ -284,9 +284,9 @@ process_group() {
                 # Determine type
                 if [[ "$objectType" == "servicePrincipal" ]]; then
                     if [[ "$spnType" == "ManagedIdentity" ]]; then
-                        objectType="UAMI"
+                        objectType="ManagedIdentity"
                     elif [[ "$spnType" == "Application" ]]; then
-                        objectType="SPN"
+                        objectType="ServicePrincipal"
                     else
                         objectType="ServicePrincipal"
                     fi
@@ -378,16 +378,15 @@ TOTAL_UAMIS=0
 
 if [[ -f "$CSV_FILE" ]]; then
     # Count all non-header lines that aren't "No members"
-    TOTAL_LINES=$(tail -n +2 "$CSV_FILE" | wc -l)
     TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
     
     # Count unique groups with members
     GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | cut -d',' -f1 | sort -u | wc -l)
     
-    # Count by type - look for the last column which has the object type
-    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "user" | wc -l)
-    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "spn" | wc -l)
-    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "uami" | wc -l)
+    # Count by type - use the last column (ObjectType)
+    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "^\"user\"$" | wc -l)
+    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "serviceprincipal" | wc -l)
+    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "managedidentity" | wc -l)
 fi
 
 # -------------------------
