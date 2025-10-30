@@ -253,3 +253,9 @@ else
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" 2>/dev/null || echo "{\"value\":[]}")
 fi
+
+# Refresh Azure CLI token to ensure it meets current policies
+echo "🔄 Refreshing Azure CLI token..."
+az account get-access-token --resource https://graph.microsoft.com >/dev/null 2>&1 || {
+    echo "⚠️  Warning: Could not refresh token. You may need to run: az login"
+}
