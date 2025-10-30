@@ -280,8 +280,9 @@ process_group() {
             echo "$members" | jq -r '.[] | [.displayName // "N/A", .userPrincipalName // .appId // "N/A", .id // "N/A", .odatatype // "N/A", .servicePrincipalType // "N/A"] | @tsv' | while IFS=$'\t' read -r displayName upn id objectType spnType; do
                 
                 # Debug output
-                echo "DEBUG: Member='$displayName', spnType='$spnType', odatatype='$objectType'" >&2
+                # echo "DEBUG: Member='$displayName', spnType='$spnType', odatatype='$objectType'" >&2
                 
+                spnType=$(echo "$spnType" | tr -d '\r\n"' | xargs)
                 # Determine type - check servicePrincipalType FIRST
                 if [[ "$spnType" == "ManagedIdentity" ]]; then
                     finalType="ManagedIdentity"
@@ -292,7 +293,7 @@ process_group() {
                     finalType=$(echo "$objectType" | sed 's|#microsoft.graph.||')
                 fi
                 
-                echo "DEBUG: Final type='$finalType'" >&2
+                # echo "DEBUG: Final type='$finalType'" >&2
                 
                 # Write to temp files
                 printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "$displayName" "$upn" "$finalType" >> "$TABLE_TEMP_FILE"
