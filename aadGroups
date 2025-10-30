@@ -259,3 +259,21 @@ echo "🔄 Refreshing Azure CLI token..."
 az account get-access-token --resource https://graph.microsoft.com >/dev/null 2>&1 || {
     echo "⚠️  Warning: Could not refresh token. You may need to run: az login"
 }
+
+
+# -------------------------
+# Fetch groups from Azure AD
+# -------------------------
+echo "🔄 Getting access token..."
+ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+    echo "❌ ERROR: Could not obtain access token. Please run: az login"
+    exit 1
+fi
+
+echo "📋 Fetching groups from Azure AD..."
+groups=$(curl -s -X GET \
+    "https://graph.microsoft.com/v1.0/groups?\$filter=startswith(displayName,'${PREFIX}')&\$select=id,displayName" \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json")
