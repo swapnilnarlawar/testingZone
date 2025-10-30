@@ -24,20 +24,34 @@ OUTPUT_DIR="./aad_group_reports"
 TMP_DIR="${OUTPUT_DIR}/tmp_logs"
 mkdir -p "$OUTPUT_DIR" "$TMP_DIR"
 
-DATE_STR=$(date +%Y%m%d)
+DATE_STR=$(date +%Y%m%d_%H%M%S)
 FINAL_LOG="${OUTPUT_DIR}/${PREFIX}_aad_groups_full_${DATE_STR}.log"
 TABLE_FILE="${OUTPUT_DIR}/${PREFIX}_aad_groups_table_${DATE_STR}.txt"
 CSV_FILE="${OUTPUT_DIR}/${PREFIX}_aad_groups_${DATE_STR}.csv"
+ERROR_LOG="${OUTPUT_DIR}/${PREFIX}_errors_${DATE_STR}.log"
 
 # -------------------------
 # Pre-flight checks
 # -------------------------
-for cmd in az jq xargs awk sed; do
+for cmd in az jq xargs awk sed curl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "❌ Required command '$cmd' not found. Please install."
         exit 1
     fi
 done
+
+# Check Azure CLI login status
+if ! az account show >/dev/null 2>&1; then
+    echo "❌ Not logged into Azure CLI. Please run: az login"
+    exit 1
+fi
+
+# Refresh Azure CLI token to ensure it meets current policies
+echo "🔄 Refreshing Azure CLI token..."
+if ! az account get-access-token --resource https://graph.microsoft.com >/dev/null 2>&1; then
+    echo "❌ Could not obtain access token. Please run: az login"
+    exit 1
+fi
 
 # -------------------------
 # Header output
@@ -46,16 +60,41 @@ echo "🔍 Searching Azure AD groups with prefix: $PREFIX"
 [[ -n "$FILTER_ENV" ]] && echo "🌍 Filtering for environment: $FILTER_ENV (case-insensitive)"
 [[ -n "$SKIP_WORDS" ]] && echo "🚫 Skipping groups containing words: $SKIP_WORDS"
 echo "⚡ Parallelism: $PARALLEL"
-echo "🗺 Env mapping: $ENV_MAP"
+echo "🗺  Env mapping: $ENV_MAP"
 echo
 
 # -------------------------
 # Fetch groups from Azure AD
 # -------------------------
-groups=$(az ad group list --filter "startswith(displayName,'${PREFIX}')" --query "[].{id:id,displayName:displayName}" -o json)
+echo "🔄 Getting access token..."
+ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+    echo "❌ ERROR: Could not obtain access token. Please run: az login"
+    exit 1
+fi
+
+echo "📋 Fetching groups from Azure AD..."
+groups_response=$(curl -s -X GET \
+    "https://graph.microsoft.com/v1.0/groups?\$filter=startswith(displayName,'${PREFIX}')&\$select=id,displayName" \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json")
+
+# Check for API errors
+if echo "$groups_response" | jq -e '.error' >/dev/null 2>&1; then
+    echo "❌ ERROR: Graph API returned an error:"
+    echo "$groups_response" | jq '.error'
+    exit 1
+fi
 
 TMP_GROUPS="${TMP_DIR}/aad_groups_$$.txt"
-echo "$groups" | jq -r '.[] | [.id, .displayName] | @tsv' > "$TMP_GROUPS"
+echo "$groups_response" | jq -r '.value[]? | [.id, .displayName] | @tsv' > "$TMP_GROUPS"
+
+# Check if any groups were found
+if [[ ! -s "$TMP_GROUPS" ]]; then
+    echo "⚠️  No groups found with prefix: $PREFIX"
+    exit 0
+fi
 
 # -------------------------
 # Function: translate env code
@@ -87,7 +126,6 @@ ENV_CODES_REGEX=$(echo "$ENV_MAP" | awk -F, '{
         printf "%s", codes[i]
         if(i<NF) printf "|"
     }
-    print ""
 }')
 export ENV_CODES_REGEX
 
@@ -102,6 +140,7 @@ if [[ -n "$SKIP_WORDS" ]]; then
         skip_group=0
         for(i=1;i<=n;i++){
             w=words[i]
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", w)
             if(tolower($2) ~ tolower(w)) skip_group=1
         }
         if(skip_group==0) print $0
@@ -130,150 +169,263 @@ if [[ -n "$FILTER_ENV" ]]; then
         if(tolower(translate(envCode, env_map))==tolower(env)) print $0
     }' "$TMP_GROUPS" > "$TMP_GROUPS_FILTERED_ENV"
     TMP_GROUPS="$TMP_GROUPS_FILTERED_ENV"
+    
+    # Check if filtering resulted in no groups
+    if [[ ! -s "$TMP_GROUPS" ]]; then
+        echo "⚠️  No groups found after filtering for environment: $FILTER_ENV"
+        exit 0
+    fi
 fi
 
 # -------------------------
 # Count total groups
 # -------------------------
 TOTAL_GROUPS=$(wc -l < "$TMP_GROUPS")
-echo "Total groups to process: $TOTAL_GROUPS"
+echo "📊 Total groups to process: $TOTAL_GROUPS"
+echo
 
 # -------------------------
-# Initialize output files
+# Initialize output files with proper headers
 # -------------------------
-printf "%-60s %-10s %-40s %-50s %-15s\n" "GroupName" "Env" "MemberDisplayName" "UserPrincipalName" "ObjectType" > "$TABLE_FILE"
-echo "GroupName,Env,MemberDisplayName,UserPrincipalName,ObjectId,ObjectType" > "$CSV_FILE"
+printf "%-60s %-12s %-40s %-50s %-20s\n" "GroupName" "Environment" "MemberDisplayName" "UserPrincipalName/AppId" "ObjectType" > "$TABLE_FILE"
+echo "GroupName,Environment,MemberDisplayName,UserPrincipalName,ObjectId,ObjectType" > "$CSV_FILE"
 
-PROGRESS_FILE="${TMP_DIR}/progress_$$.txt"
-echo 0 > "$PROGRESS_FILE"
+# Create separate temp files for each output to avoid write conflicts
+TABLE_TEMP_DIR="${TMP_DIR}/table_parts"
+CSV_TEMP_DIR="${TMP_DIR}/csv_parts"
+mkdir -p "$TABLE_TEMP_DIR" "$CSV_TEMP_DIR"
 
-PROGRESS_FILE_TMP="${TMP_DIR}/progress_tmp_$$.txt"
-touch "$PROGRESS_FILE_TMP"
+PROGRESS_COUNTER="${TMP_DIR}/progress_counter_$.txt"
+echo 0 > "$PROGRESS_COUNTER"
 
-export TABLE_FILE CSV_FILE FILTER_ENV PROGRESS_FILE TOTAL_GROUPS SKIP_WORDS TMP_DIR PREFIX DATE_STR
+export TABLE_FILE CSV_FILE ERROR_LOG FILTER_ENV PROGRESS_COUNTER TOTAL_GROUPS SKIP_WORDS TMP_DIR PREFIX DATE_STR TABLE_TEMP_DIR CSV_TEMP_DIR
 
 # -------------------------
-# Process groups in parallel (safe defaults for optional args)
+# Process groups in parallel
 # -------------------------
-cat "$TMP_GROUPS" | xargs -L1 -P"$PARALLEL" bash -c '
-groupId="$0"
-groupName="$1"
-
-# Skip words (optional)
-if [[ -n "$SKIP_WORDS" ]]; then
-    IFS="," read -ra words <<< "$SKIP_WORDS"
-    for word in "${words[@]}"; do
-        if [[ "${groupName,,}" == *"${word,,}"* ]]; then
-            echo "Skipping group $groupName due to skip word: $word"
-            exit 0
-        fi
-    done
-fi
-
-# Env translation
-envCode=$(echo "$groupName" | sed -nE "s/.*-(${ENV_CODES_REGEX})_.*/\1/p" | head -n1)
-[[ -z "$envCode" ]] && envCode="unknown"
-envName=$(translate_env "$envCode")
-
-# Env filter (optional)
-if [[ -n "$FILTER_ENV" && "${FILTER_ENV,,}" != "${envName,,}" ]]; then
-    exit 0
-fi
-
-# Fetch members with all necessary fields including SPNs and UAMIs
-# Using --query to get id, displayName, userPrincipalName, servicePrincipalNames, and odatatype
-members=$(az ad group member list --group "$groupId" --query "[].{id:id,displayName:displayName,userPrincipalName:userPrincipalName,odatatype:\"@odata.type\"}" -o json)
-memberCount=$(echo "$members" | jq length)
-
-# Progress
-current=$(($(wc -l < "'"$PROGRESS_FILE_TMP"'") + 1))
-echo "$groupName" >> "'"$PROGRESS_FILE_TMP"'"
-echo "Processing group $current / $TOTAL_GROUPS: $groupName"
-
-LOG_FILE="${TMP_DIR}/${PREFIX}_log_${groupName}_${DATE_STR}.txt"
-
-{
-    printf "%s\n" "------------------------------------------------------------"
-    printf "📘 Group: %s\n" "$groupName"
-    printf "🌍 Environment: %s\n" "$envName"
-    printf "👥 Members (%d):\n" "$memberCount"
-
-    if [[ "$memberCount" -gt 0 ]]; then
-        echo "$members" | jq -r ".[] | [.displayName // \"N/A\", .userPrincipalName // \"N/A\", .id // \"N/A\", .odatatype // \"N/A\"] | @tsv" | while IFS=$'\t' read -r displayName upn id objectType; do
-            # Clean up object type to be more readable
-            objectType=$(echo "$objectType" | sed "s|#microsoft.graph.||")
-            
-            printf "%-60s %-10s %-40s %-50s %-15s\n" "$groupName" "$envName" "$displayName" "$upn" "$objectType" >> "'"$TABLE_FILE"'"
-            echo "\"$groupName\",\"$envName\",\"$displayName\",\"$upn\",\"$id\",\"$objectType\"" >> "'"$CSV_FILE"'"
-            printf " - %s (%s) [%s] [%s]\n" "$displayName" "$upn" "$id" "$objectType"
+process_group() {
+    local groupId="$1"
+    local groupName="$2"
+    
+    # Skip words check (optional)
+    if [[ -n "$SKIP_WORDS" ]]; then
+        IFS="," read -ra words <<< "$SKIP_WORDS"
+        for word in "${words[@]}"; do
+            word=$(echo "$word" | xargs)  # Trim whitespace
+            if [[ "${groupName,,}" == *"${word,,}"* ]]; then
+                echo "⏭️  Skipping group $groupName due to skip word: $word"
+                return 0
+            fi
         done
-    else
-        printf "%-60s %-10s %-40s %-50s %-15s\n" "$groupName" "$envName" "No members" "-" "-" >> "'"$TABLE_FILE"'"
-        echo "\"$groupName\",\"$envName\",\"No members\",\"-\",\"-\",\"-\"" >> "'"$CSV_FILE"'"
-        printf "   (none)\n"
     fi
-} >> "$LOG_FILE" 2>&1
-' _ {} "$TMP_DIR" "$PREFIX" "$DATE_STR" "${SKIP_WORDS:-}" "${FILTER_ENV:-}"
+    
+    # Env translation
+    envCode=$(echo "$groupName" | sed -nE "s/.*-(${ENV_CODES_REGEX})_.*/\1/p" | head -n1)
+    [[ -z "$envCode" ]] && envCode="unknown"
+    envName=$(translate_env "$envCode")
+    
+    # Env filter (optional)
+    if [[ -n "$FILTER_ENV" && "${FILTER_ENV,,}" != "${envName,,}" ]]; then
+        return 0
+    fi
+    
+    # Update progress - use unique temp file per process
+    PROGRESS_TEMP="${PROGRESS_COUNTER}_${groupId}"
+    echo "1" > "$PROGRESS_TEMP"
+    current=$(find "$(dirname "$PROGRESS_COUNTER")" -name "$(basename "$PROGRESS_COUNTER")_*" 2>/dev/null | wc -l)
+    
+    echo "[$current/$TOTAL_GROUPS] Processing: $groupName ($envName)"
+    
+    # Fetch ALL members including users, service principals, and managed identities
+    # Get a fresh access token for this subprocess
+    ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
+    
+    if [[ -z "$ACCESS_TOKEN" ]]; then
+        echo "❌ ERROR: Could not obtain access token for group $groupName" | tee -a "$ERROR_LOG" >&2
+        return 1
+    fi
+    
+    # Use beta endpoint with explicit token to get all member types including UAMIs
+    members_response=$(curl -s -X GET \
+        "https://graph.microsoft.com/beta/groups/$groupId/members" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" 2>/dev/null || echo "{\"value\":[]}")
+    
+    # Check for API errors
+    if echo "$members_response" | jq -e '.error' >/dev/null 2>&1; then
+        echo "❌ ERROR processing group $groupName: $(echo "$members_response" | jq -r '.error.message')" | tee -a "$ERROR_LOG" >&2
+        return 1
+    fi
+    
+    # Extract only the fields we need from the response
+    members=$(echo "$members_response" | jq "[.value[]? | {
+        id: .id, 
+        displayName: .displayName, 
+        userPrincipalName: .userPrincipalName, 
+        appId: .appId, 
+        servicePrincipalType: .servicePrincipalType,
+        odatatype: .[\"@odata.type\"]
+    }]" 2>/dev/null || echo "[]")
+    
+    memberCount=$(echo "$members" | jq length)
+    
+    # Create unique temp files for this group's output
+    TABLE_TEMP_FILE="${TABLE_TEMP_DIR}/${groupId}.txt"
+    CSV_TEMP_FILE="${CSV_TEMP_DIR}/${groupId}.csv"
+    
+    LOG_FILE="${TMP_DIR}/${PREFIX}_log_${groupName//\//_}_${DATE_STR}.txt"
+    
+    {
+        printf "%s\n" "============================================================"
+        printf "📘 Group: %s\n" "$groupName"
+        printf "🆔 Group ID: %s\n" "$groupId"
+        printf "🌍 Environment: %s\n" "$envName"
+        printf "👥 Members: %d\n" "$memberCount"
+        printf "%s\n" "------------------------------------------------------------"
+        
+        if [[ "$memberCount" -gt 0 ]]; then
+            echo "$members" | jq -r ".[] | [.displayName // \"N/A\", .userPrincipalName // .appId // \"N/A\", .id // \"N/A\", .odatatype // \"N/A\", .servicePrincipalType // \"N/A\"] | @tsv" | while IFS=$'\t' read -r displayName upn id objectType spnType; do
+                # Clean up object type to be more readable
+                objectType=$(echo "$objectType" | sed "s|#microsoft.graph.||")
+                
+                # Determine the actual type with more precision
+                if [[ "$objectType" == "servicePrincipal" ]]; then
+                    if [[ "$spnType" == "ManagedIdentity" ]]; then
+                        objectType="UAMI"
+                    elif [[ "$spnType" == "Application" ]]; then
+                        objectType="SPN"
+                    else
+                        objectType="ServicePrincipal"
+                    fi
+                fi
+                
+                # Write to temp files (each process has its own file - no conflicts)
+                printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "$displayName" "$upn" "$objectType" >> "$TABLE_TEMP_FILE"
+                printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n" "$groupName" "$envName" "$displayName" "$upn" "$id" "$objectType" >> "$CSV_TEMP_FILE"
+                
+                printf "  ├─ %s\n" "$displayName"
+                printf "     │ Type: %s\n" "$objectType"
+                printf "     │ UPN/AppId: %s\n" "$upn"
+                printf "     └ ID: %s\n" "$id"
+            done
+        else
+            # Write empty group to temp files
+            printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "(No members)" "-" "-" >> "$TABLE_TEMP_FILE"
+            printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n" "$groupName" "$envName" "No members" "-" "-" "-" >> "$CSV_TEMP_FILE"
+            
+            printf "  └─ (No members)\n"
+        fi
+        printf "\n"
+    } >> "$LOG_FILE" 2>&1
+}
 
+export -f process_group
 
-# -------------------------
-# Clean up temp files
-# -------------------------
-rm -f "$TMP_DIR"/aad_groups_* "$PROGRESS_FILE"
+# Process groups with proper argument handling
+cat "$TMP_GROUPS" | while IFS=
 
 # -------------------------
 # Consolidate logs
 # -------------------------
-cat "${TMP_DIR}"/*.txt > "$FINAL_LOG" 2>&1 || true
-rm -rf "$TMP_DIR"
+echo
+echo "📝 Consolidating logs..."
+if ls "${TMP_DIR}"/*.txt >/dev/null 2>&1; then
+    cat "${TMP_DIR}"/*.txt > "$FINAL_LOG" 2>&1
+    rm -f "${TMP_DIR}"/*.txt
+else
+    echo "No logs to consolidate" > "$FINAL_LOG"
+fi
+
+# -------------------------
+# Summary statistics
+# -------------------------
+TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
+GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
+TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ",user\"" | wc -l)
+TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ",spn\"" | wc -l)
+TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ",uami\"" | wc -l)
 
 # -------------------------
 # Done
 # -------------------------
 echo
 echo "✅ Report complete!"
-echo "📄 Table format saved at: $TABLE_FILE"
-echo "📊 CSV format saved at:   $CSV_FILE"
-echo "📝 Full consolidated log saved at: $FINAL_LOG"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📊 Summary Statistics:"
+echo "   • Groups processed: $TOTAL_GROUPS"
+echo "   • Groups with members: $GROUPS_WITH_MEMBERS"
+echo "   • Total members: $TOTAL_MEMBERS"
+echo "   • Users: $TOTAL_USERS"
+echo "   • Service Principals: $TOTAL_SPNS"
+echo "   • Managed Identities (UAMIs): $TOTAL_UAMIS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📄 Table format: $TABLE_FILE"
+echo "📊 CSV format: $CSV_FILE"
+echo "📝 Full log: $FINAL_LOG"
+[[ -f "$ERROR_LOG" ]] && echo "⚠️  Error log: $ERROR_LOG"
+echo\t' read -r groupId groupName; do
+    echo "$groupId" "$groupName"
+done | xargs -L1 -P"$PARALLEL" bash -c 'process_group "$1" "$2"' --
 
+# -------------------------
+# Merge all temp files into final outputs
+# -------------------------
+echo
+echo "📝 Merging results..."
 
-# Fetch ALL members including users, service principals, and managed identities
-# Using beta endpoint which returns UAMIs, with explicit token to handle CAE
+# Merge table parts
+if ls "$TABLE_TEMP_DIR"/*.txt >/dev/null 2>&1; then
+    cat "$TABLE_TEMP_DIR"/*.txt >> "$TABLE_FILE"
+fi
 
-# Get a fresh access token for Microsoft Graph
-ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
+# Merge CSV parts
+if ls "$CSV_TEMP_DIR"/*.csv >/dev/null 2>&1; then
+    cat "$CSV_TEMP_DIR"/*.csv >> "$CSV_FILE"
+fi
 
-if [[ -z "$ACCESS_TOKEN" ]]; then
-    echo "ERROR: Could not obtain access token for group $groupName" >&2
-    members_response="{\"value\":[]}"
+# -------------------------
+# Clean up temp files
+# -------------------------
+rm -rf "$TABLE_TEMP_DIR" "$CSV_TEMP_DIR"
+rm -f "$TMP_DIR"/aad_groups_* "${PROGRESS_COUNTER}"_*
+
+# -------------------------
+# Consolidate logs
+# -------------------------
+echo
+echo "📝 Consolidating logs..."
+if ls "${TMP_DIR}"/*.txt >/dev/null 2>&1; then
+    cat "${TMP_DIR}"/*.txt > "$FINAL_LOG" 2>&1
+    rm -f "${TMP_DIR}"/*.txt
 else
-    # Use beta endpoint with explicit token to get all member types including UAMIs
-    members_response=$(curl -s -X GET \
-        "https://graph.microsoft.com/beta/groups/$groupId/members" \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" 2>/dev/null || echo "{\"value\":[]}")
+    echo "No logs to consolidate" > "$FINAL_LOG"
 fi
 
-# Refresh Azure CLI token to ensure it meets current policies
-echo "🔄 Refreshing Azure CLI token..."
-az account get-access-token --resource https://graph.microsoft.com >/dev/null 2>&1 || {
-    echo "⚠️  Warning: Could not refresh token. You may need to run: az login"
-}
-
+# -------------------------
+# Summary statistics
+# -------------------------
+TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
+GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
+TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ",user\"" | wc -l)
+TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ",spn\"" | wc -l)
+TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ",uami\"" | wc -l)
 
 # -------------------------
-# Fetch groups from Azure AD
+# Done
 # -------------------------
-echo "🔄 Getting access token..."
-ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
-
-if [[ -z "$ACCESS_TOKEN" ]]; then
-    echo "❌ ERROR: Could not obtain access token. Please run: az login"
-    exit 1
-fi
-
-echo "📋 Fetching groups from Azure AD..."
-groups=$(curl -s -X GET \
-    "https://graph.microsoft.com/v1.0/groups?\$filter=startswith(displayName,'${PREFIX}')&\$select=id,displayName" \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -H "Content-Type: application/json")
+echo
+echo "✅ Report complete!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📊 Summary Statistics:"
+echo "   • Groups processed: $TOTAL_GROUPS"
+echo "   • Groups with members: $GROUPS_WITH_MEMBERS"
+echo "   • Total members: $TOTAL_MEMBERS"
+echo "   • Users: $TOTAL_USERS"
+echo "   • Service Principals: $TOTAL_SPNS"
+echo "   • Managed Identities (UAMIs): $TOTAL_UAMIS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📄 Table format: $TABLE_FILE"
+echo "📊 CSV format: $CSV_FILE"
+echo "📝 Full log: $FINAL_LOG"
+[[ -f "$ERROR_LOG" ]] && echo "⚠️  Error log: $ERROR_LOG"
+echo
