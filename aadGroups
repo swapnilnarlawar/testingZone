@@ -33,7 +33,7 @@ ERROR_LOG="${OUTPUT_DIR}/${PREFIX}_errors_${DATE_STR}.log"
 # -------------------------
 # Pre-flight checks
 # -------------------------
-for cmd in az jq xargs awk sed curl; do
+for cmd in az jq awk sed curl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "❌ Required command '$cmd' not found. Please install."
         exit 1
@@ -111,8 +111,6 @@ translate_env() {
     done
     echo "unknown"
 }
-export -f translate_env
-export ENV_MAP
 
 # -------------------------
 # Derive env codes dynamically from ENV_MAP
@@ -127,7 +125,6 @@ ENV_CODES_REGEX=$(echo "$ENV_MAP" | awk -F, '{
         if(i<NF) printf "|"
     }
 }')
-export ENV_CODES_REGEX
 
 # -------------------------
 # Apply skip-word filter if present
@@ -198,10 +195,8 @@ mkdir -p "$TABLE_TEMP_DIR" "$CSV_TEMP_DIR"
 PROGRESS_COUNTER="${TMP_DIR}/progress_counter_$$.txt"
 echo 0 > "$PROGRESS_COUNTER"
 
-export TABLE_FILE CSV_FILE ERROR_LOG FILTER_ENV PROGRESS_COUNTER TOTAL_GROUPS SKIP_WORDS TMP_DIR PREFIX DATE_STR TABLE_TEMP_DIR CSV_TEMP_DIR
-
 # -------------------------
-# Process groups in parallel
+# Process group function
 # -------------------------
 process_group() {
     local groupId="$1"
@@ -211,7 +206,7 @@ process_group() {
     if [[ -n "$SKIP_WORDS" ]]; then
         IFS="," read -ra words <<< "$SKIP_WORDS"
         for word in "${words[@]}"; do
-            word=$(echo "$word" | xargs)  # Trim whitespace
+            word=$(echo "$word" | xargs)
             if [[ "${groupName,,}" == *"${word,,}"* ]]; then
                 echo "⏭️  Skipping group $groupName due to skip word: $word"
                 return 0
@@ -229,13 +224,12 @@ process_group() {
         return 0
     fi
     
-    # Update progress - use unique temp file per process
+    # Update progress
     PROGRESS_TEMP="${PROGRESS_COUNTER}_${groupId}"
     echo "1" > "$PROGRESS_TEMP"
     
-    printf "Processing: %s (%s)\n" "$groupName" "$envName"
+    echo "Processing: $groupName - $envName"
     
-    # Fetch ALL members including users, service principals, and managed identities
     # Get a fresh access token for this subprocess
     ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
     
@@ -244,7 +238,7 @@ process_group() {
         return 1
     fi
     
-    # Use beta endpoint with explicit token to get all member types including UAMIs
+    # Use beta endpoint to get all member types including UAMIs
     members_response=$(curl -s -X GET \
         "https://graph.microsoft.com/beta/groups/$groupId/members" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -256,7 +250,7 @@ process_group() {
         return 1
     fi
     
-    # Extract only the fields we need from the response
+    # Extract needed fields
     members=$(echo "$members_response" | jq '[.value[]? | {
         id: .id, 
         displayName: .displayName, 
@@ -268,7 +262,7 @@ process_group() {
     
     memberCount=$(echo "$members" | jq length)
     
-    # Create unique temp files for this group's output
+    # Create unique temp files for this group
     TABLE_TEMP_FILE="${TABLE_TEMP_DIR}/${groupId}.txt"
     CSV_TEMP_FILE="${CSV_TEMP_DIR}/${groupId}.csv"
     
@@ -284,10 +278,10 @@ process_group() {
         
         if [[ "$memberCount" -gt 0 ]]; then
             echo "$members" | jq -r '.[] | [.displayName // "N/A", .userPrincipalName // .appId // "N/A", .id // "N/A", .odatatype // "N/A", .servicePrincipalType // "N/A"] | @tsv' | while IFS=$'\t' read -r displayName upn id objectType spnType; do
-                # Clean up object type to be more readable
+                # Clean up object type
                 objectType=$(echo "$objectType" | sed 's|#microsoft.graph.||')
                 
-                # Determine the actual type with more precision
+                # Determine type
                 if [[ "$objectType" == "servicePrincipal" ]]; then
                     if [[ "$spnType" == "ManagedIdentity" ]]; then
                         objectType="UAMI"
@@ -298,7 +292,7 @@ process_group() {
                     fi
                 fi
                 
-                # Write to temp files (each process has its own file - no conflicts)
+                # Write to temp files
                 printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "$displayName" "$upn" "$objectType" >> "$TABLE_TEMP_FILE"
                 printf '"%s","%s","%s","%s","%s","%s"\n' "$groupName" "$envName" "$displayName" "$upn" "$id" "$objectType" >> "$CSV_TEMP_FILE"
                 
@@ -308,7 +302,7 @@ process_group() {
                 printf "     └ ID: %s\n" "$id"
             done
         else
-            # Write empty group to temp files
+            # Write empty group
             printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "(No members)" "-" "-" >> "$TABLE_TEMP_FILE"
             printf '"%s","%s","%s","%s","%s","%s"\n' "$groupName" "$envName" "No members" "-" "-" "-" >> "$CSV_TEMP_FILE"
             
@@ -318,85 +312,23 @@ process_group() {
     } >> "$LOG_FILE" 2>&1
 }
 
-export -f process_group
-
-# Process groups with proper argument handling
+# -------------------------
+# Process groups in parallel
+# -------------------------
 echo "🚀 Starting parallel processing..."
 echo
 
-cat "$TMP_GROUPS" | while IFS=
+while IFS=$'\t' read -r groupId groupName; do
+    process_group "$groupId" "$groupName" &
+    
+    # Limit concurrent processes
+    while [[ $(jobs -r | wc -l) -ge $PARALLEL ]]; do
+        sleep 0.1
+    done
+done < "$TMP_GROUPS"
 
-# -------------------------
-# Merge all temp files into final outputs
-# -------------------------
-echo
-echo "📝 Merging results..."
-
-# Merge table parts
-if ls "$TABLE_TEMP_DIR"/*.txt >/dev/null 2>&1; then
-    cat "$TABLE_TEMP_DIR"/*.txt >> "$TABLE_FILE"
-fi
-
-# Merge CSV parts
-if ls "$CSV_TEMP_DIR"/*.csv >/dev/null 2>&1; then
-    cat "$CSV_TEMP_DIR"/*.csv >> "$CSV_FILE"
-fi
-
-# -------------------------
-# Clean up temp files
-# -------------------------
-rm -rf "$TABLE_TEMP_DIR" "$CSV_TEMP_DIR"
-rm -f "$TMP_DIR"/aad_groups_* "${PROGRESS_COUNTER}"_*
-
-# -------------------------
-# Consolidate logs
-# -------------------------
-echo "📝 Consolidating logs..."
-if ls "${TMP_DIR}"/*.txt >/dev/null 2>&1; then
-    cat "${TMP_DIR}"/*.txt > "$FINAL_LOG" 2>&1
-    rm -f "${TMP_DIR}"/*.txt
-else
-    echo "No logs to consolidate" > "$FINAL_LOG"
-fi
-
-# -------------------------
-# Summary statistics
-# -------------------------
-if [[ -f "$CSV_FILE" ]] && [[ $(wc -l < "$CSV_FILE") -gt 1 ]]; then
-    TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
-    GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
-    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ',user"' | wc -l)
-    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ',spn"' | wc -l)
-    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ',uami"' | wc -l)
-else
-    TOTAL_MEMBERS=0
-    GROUPS_WITH_MEMBERS=0
-    TOTAL_USERS=0
-    TOTAL_SPNS=0
-    TOTAL_UAMIS=0
-fi
-
-# -------------------------
-# Done
-# -------------------------
-echo
-echo "✅ Report complete!"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📊 Summary Statistics:"
-echo "   • Groups processed: $TOTAL_GROUPS"
-echo "   • Groups with members: $GROUPS_WITH_MEMBERS"
-echo "   • Total members: $TOTAL_MEMBERS"
-echo "   • Users: $TOTAL_USERS"
-echo "   • Service Principals: $TOTAL_SPNS"
-echo "   • Managed Identities (UAMIs): $TOTAL_UAMIS"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📄 Table format: $TABLE_FILE"
-echo "📊 CSV format: $CSV_FILE"
-echo "📝 Full log: $FINAL_LOG"
-[[ -f "$ERROR_LOG" ]] && echo "⚠️  Error log: $ERROR_LOG"
-echo\t' read -r groupId groupName; do
-    echo "$groupId" "$groupName"
-done | xargs -L1 -P"$PARALLEL" bash -c 'process_group "$1" "$2"' --
+# Wait for all background jobs to complete
+wait
 
 echo
 echo "✅ All groups processed!"
@@ -404,7 +336,6 @@ echo "✅ All groups processed!"
 # -------------------------
 # Merge all temp files into final outputs
 # -------------------------
-echo
 echo "📝 Merging results..."
 
 # Merge table parts
