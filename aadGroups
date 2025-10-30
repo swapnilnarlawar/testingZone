@@ -233,7 +233,7 @@ process_group() {
     PROGRESS_TEMP="${PROGRESS_COUNTER}_${groupId}"
     echo "1" > "$PROGRESS_TEMP"
     
-    echo "Processing: $groupName ($envName)"
+    printf "Processing: %s (%s)\n" "$groupName" "$envName"
     
     # Fetch ALL members including users, service principals, and managed identities
     # Get a fresh access token for this subprocess
