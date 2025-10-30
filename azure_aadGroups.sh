@@ -40,13 +40,16 @@ call_graph_api() {
     local delay=2
     local attempt=1
     local response body status
+    
     echo "🔄 Getting access token..."
+    # get a fresh access token 
     ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
 
     if [[ -z "$ACCESS_TOKEN" ]]; then
         echo "❌ ERROR: Could not obtain access token. Please run: az login"
         exit 1
     fi
+    
     while (( attempt <= max_retries )); do
       # capture response and status code
       response=$(curl -s -w "%{http_code}" -H "Authorization: Bearer $GRAPH_TOKEN" -H "Content-Type: application/json" "$url")
@@ -256,14 +259,6 @@ process_group() {
     
     echo "Processing: $groupName - $envName"
     
-    # Get a fresh access token for this subprocess
-    ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
-    
-    if [[ -z "$ACCESS_TOKEN" ]]; then
-        echo "❌ ERROR: Could not obtain access token for group $groupName" | tee -a "$ERROR_LOG" >&2
-        return 1
-    fi
-    
     # Use beta endpoint to get all member types including UAMIs
     members_response=$(call_graph_api "https://graph.microsoft.com/beta/groups/${group_id}/members")
 
@@ -379,6 +374,7 @@ fi
 # -------------------------
 rm -rf "$TABLE_TEMP_DIR" "$CSV_TEMP_DIR"
 rm -f "$TMP_DIR"/aad_groups_* "${PROGRESS_COUNTER}"_*
+rm -f "$TMP_DIR"/progress_counter_*
 
 # -------------------------
 # Consolidate logs
