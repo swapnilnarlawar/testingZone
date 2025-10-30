@@ -41,7 +41,6 @@ call_graph_api() {
     local attempt=1
     local response body status
     
-    echo "🔄 Getting access token..."
     # get a fresh access token 
     ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
 
