@@ -31,6 +31,37 @@ CSV_FILE="${OUTPUT_DIR}/${PREFIX}_aad_groups_${DATE_STR}.csv"
 ERROR_LOG="${OUTPUT_DIR}/${PREFIX}_errors_${DATE_STR}.log"
 
 # -------------------------
+# Helper Functions
+# -------------------------
+# --- Reliable Graph API call with retry logic ---
+call_graph_api() {
+  local url="$1"
+  local max_retries=3
+  local delay=2
+  local attempt=1
+  local response body status
+
+  while (( attempt <= max_retries )); do
+    # capture response and status code
+    response=$(curl -s -w "%{http_code}" -H "Authorization: Bearer $GRAPH_TOKEN" -H "Content-Type: application/json" "$url")
+    status="${response: -3}"
+    body="${response::-3}"
+
+    if [[ "$status" -eq 200 ]]; then
+      echo "$body"
+      return 0
+    else
+      echo "⚠️  Graph API call failed (status $status) for $url (attempt $attempt/$max_retries)" >&2
+      (( attempt++ ))
+      sleep $(( delay * (attempt - 1) ))  # exponential backoff
+    fi
+  done
+
+  echo "❌ Failed after $max_retries attempts: $url" >&2
+  return 1
+}
+
+# -------------------------
 # Pre-flight checks
 # -------------------------
 for cmd in az jq awk sed curl; do
@@ -79,6 +110,7 @@ groups_response=$(curl -s -X GET \
     "https://graph.microsoft.com/v1.0/groups?\$filter=startswith(displayName,'${PREFIX}')&\$select=id,displayName" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H "Content-Type: application/json")
+groups_response=$(call_graph_api "https://graph.microsoft.com/v1.0/groups?\$filter=startswith(displayName,'${PREFIX}')&\$select=id,displayName")
 
 # Check for API errors
 if echo "$groups_response" | jq -e '.error' >/dev/null 2>&1; then
@@ -225,10 +257,24 @@ process_group() {
     fi
     
     # Update progress
-    PROGRESS_TEMP="${PROGRESS_COUNTER}_${groupId}"
-    echo "1" > "$PROGRESS_TEMP"
+    # PROGRESS_TEMP="${PROGRESS_COUNTER}_${groupId}"
+    # echo "1" > "$PROGRESS_TEMP"
     
-    echo "Processing: $groupName - $envName"
+    # echo "Processing: $groupName - $envName"
+    local new_count
+    while true; do
+      tmp_file="${PROGRESS_COUNTER}.tmp.$$"
+      count=$(<"$PROGRESS_COUNTER" 2>/dev/null || echo 0)
+      new_count=$((count + 1))
+      echo "$new_count" > "$tmp_file"
+      if mv "$tmp_file" "$PROGRESS_COUNTER" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1  # small delay in case another process is updating
+    done
+    
+    printf "Processing %d/%d: %s - %s\n" "$new_count" "$TOTAL_GROUPS" "$groupName" "$envName"
+
     
     # Get a fresh access token for this subprocess
     ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
@@ -243,6 +289,8 @@ process_group() {
         "https://graph.microsoft.com/beta/groups/$groupId/members" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" 2>/dev/null || echo '{"value":[]}')
+    members_response=$(call_graph_api "https://graph.microsoft.com/beta/groups/${group_id}/members")
+
     
     # Check for API errors
     if echo "$members_response" | jq -e '.error' >/dev/null 2>&1; then
