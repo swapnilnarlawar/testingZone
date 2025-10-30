@@ -232,9 +232,8 @@ process_group() {
     # Update progress - use unique temp file per process
     PROGRESS_TEMP="${PROGRESS_COUNTER}_${groupId}"
     echo "1" > "$PROGRESS_TEMP"
-    current=$(find "$(dirname "$PROGRESS_COUNTER")" -name "$(basename "$PROGRESS_COUNTER")_*" 2>/dev/null | wc -l)
     
-    echo "[$current/$TOTAL_GROUPS] Processing: $groupName ($envName)"
+    echo "Processing: $groupName ($envName)"
     
     # Fetch ALL members including users, service principals, and managed identities
     # Get a fresh access token for this subprocess
@@ -322,9 +321,10 @@ process_group() {
 export -f process_group
 
 # Process groups with proper argument handling
-cat "$TMP_GROUPS" | while IFS=$'\t' read -r groupId groupName; do
-    echo "$groupId" "$groupName"
-done | xargs -L1 -P"$PARALLEL" bash -c 'process_group "$1" "$2"' --
+echo "🚀 Starting parallel processing..."
+echo
+
+cat "$TMP_GROUPS" | while IFS=
 
 # -------------------------
 # Merge all temp files into final outputs
@@ -362,11 +362,94 @@ fi
 # -------------------------
 # Summary statistics
 # -------------------------
-TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
-GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
-TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ',user"' | wc -l)
-TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ',spn"' | wc -l)
-TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ',uami"' | wc -l)
+if [[ -f "$CSV_FILE" ]] && [[ $(wc -l < "$CSV_FILE") -gt 1 ]]; then
+    TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
+    GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
+    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ',user"' | wc -l)
+    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ',spn"' | wc -l)
+    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ',uami"' | wc -l)
+else
+    TOTAL_MEMBERS=0
+    GROUPS_WITH_MEMBERS=0
+    TOTAL_USERS=0
+    TOTAL_SPNS=0
+    TOTAL_UAMIS=0
+fi
+
+# -------------------------
+# Done
+# -------------------------
+echo
+echo "✅ Report complete!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📊 Summary Statistics:"
+echo "   • Groups processed: $TOTAL_GROUPS"
+echo "   • Groups with members: $GROUPS_WITH_MEMBERS"
+echo "   • Total members: $TOTAL_MEMBERS"
+echo "   • Users: $TOTAL_USERS"
+echo "   • Service Principals: $TOTAL_SPNS"
+echo "   • Managed Identities (UAMIs): $TOTAL_UAMIS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📄 Table format: $TABLE_FILE"
+echo "📊 CSV format: $CSV_FILE"
+echo "📝 Full log: $FINAL_LOG"
+[[ -f "$ERROR_LOG" ]] && echo "⚠️  Error log: $ERROR_LOG"
+echo\t' read -r groupId groupName; do
+    echo "$groupId" "$groupName"
+done | xargs -L1 -P"$PARALLEL" bash -c 'process_group "$1" "$2"' --
+
+echo
+echo "✅ All groups processed!"
+
+# -------------------------
+# Merge all temp files into final outputs
+# -------------------------
+echo
+echo "📝 Merging results..."
+
+# Merge table parts
+if ls "$TABLE_TEMP_DIR"/*.txt >/dev/null 2>&1; then
+    cat "$TABLE_TEMP_DIR"/*.txt >> "$TABLE_FILE"
+fi
+
+# Merge CSV parts
+if ls "$CSV_TEMP_DIR"/*.csv >/dev/null 2>&1; then
+    cat "$CSV_TEMP_DIR"/*.csv >> "$CSV_FILE"
+fi
+
+# -------------------------
+# Clean up temp files
+# -------------------------
+rm -rf "$TABLE_TEMP_DIR" "$CSV_TEMP_DIR"
+rm -f "$TMP_DIR"/aad_groups_* "${PROGRESS_COUNTER}"_*
+
+# -------------------------
+# Consolidate logs
+# -------------------------
+echo "📝 Consolidating logs..."
+if ls "${TMP_DIR}"/*.txt >/dev/null 2>&1; then
+    cat "${TMP_DIR}"/*.txt > "$FINAL_LOG" 2>&1
+    rm -f "${TMP_DIR}"/*.txt
+else
+    echo "No logs to consolidate" > "$FINAL_LOG"
+fi
+
+# -------------------------
+# Summary statistics
+# -------------------------
+if [[ -f "$CSV_FILE" ]] && [[ $(wc -l < "$CSV_FILE") -gt 1 ]]; then
+    TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
+    GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
+    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ',user"' | wc -l)
+    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ',spn"' | wc -l)
+    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ',uami"' | wc -l)
+else
+    TOTAL_MEMBERS=0
+    GROUPS_WITH_MEMBERS=0
+    TOTAL_USERS=0
+    TOTAL_SPNS=0
+    TOTAL_UAMIS=0
+fi
 
 # -------------------------
 # Done
