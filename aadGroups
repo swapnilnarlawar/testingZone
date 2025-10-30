@@ -235,3 +235,21 @@ echo "✅ Report complete!"
 echo "📄 Table format saved at: $TABLE_FILE"
 echo "📊 CSV format saved at:   $CSV_FILE"
 echo "📝 Full consolidated log saved at: $FINAL_LOG"
+
+
+# Fetch ALL members including users, service principals, and managed identities
+# Using beta endpoint which returns UAMIs, with explicit token to handle CAE
+
+# Get a fresh access token for Microsoft Graph
+ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+    echo "ERROR: Could not obtain access token for group $groupName" >&2
+    members_response="{\"value\":[]}"
+else
+    # Use beta endpoint with explicit token to get all member types including UAMIs
+    members_response=$(curl -s -X GET \
+        "https://graph.microsoft.com/beta/groups/$groupId/members" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" 2>/dev/null || echo "{\"value\":[]}")
+fi
