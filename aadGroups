@@ -278,26 +278,28 @@ process_group() {
         
         if [[ "$memberCount" -gt 0 ]]; then
             echo "$members" | jq -r '.[] | [.displayName // "N/A", .userPrincipalName // .appId // "N/A", .id // "N/A", .odatatype // "N/A", .servicePrincipalType // "N/A"] | @tsv' | while IFS=$'\t' read -r displayName upn id objectType spnType; do
-                # Clean up object type
-                objectType=$(echo "$objectType" | sed 's|#microsoft.graph.||')
                 
-                # Determine type
-                if [[ "$objectType" == "servicePrincipal" ]]; then
-                    if [[ "$spnType" == "ManagedIdentity" ]]; then
-                        objectType="ManagedIdentity"
-                    elif [[ "$spnType" == "Application" ]]; then
-                        objectType="ServicePrincipal"
-                    else
-                        objectType="ServicePrincipal"
-                    fi
+                # Debug output
+                echo "DEBUG: Member='$displayName', spnType='$spnType', odatatype='$objectType'" >&2
+                
+                # Determine type - check servicePrincipalType FIRST
+                if [[ "$spnType" == "ManagedIdentity" ]]; then
+                    finalType="ManagedIdentity"
+                elif [[ "$spnType" == "Application" ]]; then
+                    finalType="ServicePrincipal"
+                else
+                    # Clean up object type from @odata.type
+                    finalType=$(echo "$objectType" | sed 's|#microsoft.graph.||')
                 fi
                 
+                echo "DEBUG: Final type='$finalType'" >&2
+                
                 # Write to temp files
-                printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "$displayName" "$upn" "$objectType" >> "$TABLE_TEMP_FILE"
-                printf '"%s","%s","%s","%s","%s","%s"\n' "$groupName" "$envName" "$displayName" "$upn" "$id" "$objectType" >> "$CSV_TEMP_FILE"
+                printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "$displayName" "$upn" "$finalType" >> "$TABLE_TEMP_FILE"
+                printf '"%s","%s","%s","%s","%s","%s"\n' "$groupName" "$envName" "$displayName" "$upn" "$id" "$finalType" >> "$CSV_TEMP_FILE"
                 
                 printf "  ├─ %s\n" "$displayName"
-                printf "     │ Type: %s\n" "$objectType"
+                printf "     │ Type: %s\n" "$finalType"
                 printf "     │ UPN/AppId: %s\n" "$upn"
                 printf "     └ ID: %s\n" "$id"
             done
