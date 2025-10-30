@@ -42,7 +42,7 @@ call_graph_api() {
     local response body status
     
     # get a fresh access token 
-    ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
+    local ACCESS_TOKEN=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null)
 
     if [[ -z "$ACCESS_TOKEN" ]]; then
         echo "❌ ERROR: Could not obtain access token. Please run: az login"
@@ -51,7 +51,7 @@ call_graph_api() {
     
     while (( attempt <= max_retries )); do
       # capture response and status code
-      response=$(curl -s -w "%{http_code}" -H "Authorization: Bearer $GRAPH_TOKEN" -H "Content-Type: application/json" "$url")
+      response=$(curl -s -w "%{http_code}" -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" "$url")
       status="${response: -3}"
       body="${response::-3}"
   
@@ -68,6 +68,9 @@ call_graph_api() {
     echo "❌ Failed after $max_retries attempts: $url" >&2
     return 1
 }
+
+# Export the function so it's available in subshells
+export -f call_graph_api
 
 # -------------------------
 # Pre-flight checks
@@ -259,7 +262,7 @@ process_group() {
     echo "Processing: $groupName - $envName"
     
     # Use beta endpoint to get all member types including UAMIs
-    members_response=$(call_graph_api "https://graph.microsoft.com/beta/groups/${group_id}/members")
+    members_response=$(call_graph_api "https://graph.microsoft.com/beta/groups/${groupId}/members")
 
     # Check for API errors
     if echo "$members_response" | jq -e '.error' >/dev/null 2>&1; then
