@@ -195,7 +195,7 @@ TABLE_TEMP_DIR="${TMP_DIR}/table_parts"
 CSV_TEMP_DIR="${TMP_DIR}/csv_parts"
 mkdir -p "$TABLE_TEMP_DIR" "$CSV_TEMP_DIR"
 
-PROGRESS_COUNTER="${TMP_DIR}/progress_counter_$.txt"
+PROGRESS_COUNTER="${TMP_DIR}/progress_counter_$$.txt"
 echo 0 > "$PROGRESS_COUNTER"
 
 export TABLE_FILE CSV_FILE ERROR_LOG FILTER_ENV PROGRESS_COUNTER TOTAL_GROUPS SKIP_WORDS TMP_DIR PREFIX DATE_STR TABLE_TEMP_DIR CSV_TEMP_DIR
@@ -249,7 +249,7 @@ process_group() {
     members_response=$(curl -s -X GET \
         "https://graph.microsoft.com/beta/groups/$groupId/members" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" 2>/dev/null || echo "{\"value\":[]}")
+        -H "Content-Type: application/json" 2>/dev/null || echo '{"value":[]}')
     
     # Check for API errors
     if echo "$members_response" | jq -e '.error' >/dev/null 2>&1; then
@@ -258,14 +258,14 @@ process_group() {
     fi
     
     # Extract only the fields we need from the response
-    members=$(echo "$members_response" | jq "[.value[]? | {
+    members=$(echo "$members_response" | jq '[.value[]? | {
         id: .id, 
         displayName: .displayName, 
         userPrincipalName: .userPrincipalName, 
         appId: .appId, 
         servicePrincipalType: .servicePrincipalType,
-        odatatype: .[\"@odata.type\"]
-    }]" 2>/dev/null || echo "[]")
+        odatatype: .["@odata.type"]
+    }]' 2>/dev/null || echo '[]')
     
     memberCount=$(echo "$members" | jq length)
     
@@ -284,9 +284,9 @@ process_group() {
         printf "%s\n" "------------------------------------------------------------"
         
         if [[ "$memberCount" -gt 0 ]]; then
-            echo "$members" | jq -r ".[] | [.displayName // \"N/A\", .userPrincipalName // .appId // \"N/A\", .id // \"N/A\", .odatatype // \"N/A\", .servicePrincipalType // \"N/A\"] | @tsv" | while IFS=$'\t' read -r displayName upn id objectType spnType; do
+            echo "$members" | jq -r '.[] | [.displayName // "N/A", .userPrincipalName // .appId // "N/A", .id // "N/A", .odatatype // "N/A", .servicePrincipalType // "N/A"] | @tsv' | while IFS=$'\t' read -r displayName upn id objectType spnType; do
                 # Clean up object type to be more readable
-                objectType=$(echo "$objectType" | sed "s|#microsoft.graph.||")
+                objectType=$(echo "$objectType" | sed 's|#microsoft.graph.||')
                 
                 # Determine the actual type with more precision
                 if [[ "$objectType" == "servicePrincipal" ]]; then
@@ -301,7 +301,7 @@ process_group() {
                 
                 # Write to temp files (each process has its own file - no conflicts)
                 printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "$displayName" "$upn" "$objectType" >> "$TABLE_TEMP_FILE"
-                printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n" "$groupName" "$envName" "$displayName" "$upn" "$id" "$objectType" >> "$CSV_TEMP_FILE"
+                printf '"%s","%s","%s","%s","%s","%s"\n' "$groupName" "$envName" "$displayName" "$upn" "$id" "$objectType" >> "$CSV_TEMP_FILE"
                 
                 printf "  ├─ %s\n" "$displayName"
                 printf "     │ Type: %s\n" "$objectType"
@@ -311,7 +311,7 @@ process_group() {
         else
             # Write empty group to temp files
             printf "%-60s %-12s %-40s %-50s %-20s\n" "$groupName" "$envName" "(No members)" "-" "-" >> "$TABLE_TEMP_FILE"
-            printf "\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n" "$groupName" "$envName" "No members" "-" "-" "-" >> "$CSV_TEMP_FILE"
+            printf '"%s","%s","%s","%s","%s","%s"\n' "$groupName" "$envName" "No members" "-" "-" "-" >> "$CSV_TEMP_FILE"
             
             printf "  └─ (No members)\n"
         fi
@@ -322,48 +322,7 @@ process_group() {
 export -f process_group
 
 # Process groups with proper argument handling
-cat "$TMP_GROUPS" | while IFS=
-
-# -------------------------
-# Consolidate logs
-# -------------------------
-echo
-echo "📝 Consolidating logs..."
-if ls "${TMP_DIR}"/*.txt >/dev/null 2>&1; then
-    cat "${TMP_DIR}"/*.txt > "$FINAL_LOG" 2>&1
-    rm -f "${TMP_DIR}"/*.txt
-else
-    echo "No logs to consolidate" > "$FINAL_LOG"
-fi
-
-# -------------------------
-# Summary statistics
-# -------------------------
-TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
-GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
-TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ",user\"" | wc -l)
-TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ",spn\"" | wc -l)
-TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ",uami\"" | wc -l)
-
-# -------------------------
-# Done
-# -------------------------
-echo
-echo "✅ Report complete!"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📊 Summary Statistics:"
-echo "   • Groups processed: $TOTAL_GROUPS"
-echo "   • Groups with members: $GROUPS_WITH_MEMBERS"
-echo "   • Total members: $TOTAL_MEMBERS"
-echo "   • Users: $TOTAL_USERS"
-echo "   • Service Principals: $TOTAL_SPNS"
-echo "   • Managed Identities (UAMIs): $TOTAL_UAMIS"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📄 Table format: $TABLE_FILE"
-echo "📊 CSV format: $CSV_FILE"
-echo "📝 Full log: $FINAL_LOG"
-[[ -f "$ERROR_LOG" ]] && echo "⚠️  Error log: $ERROR_LOG"
-echo\t' read -r groupId groupName; do
+cat "$TMP_GROUPS" | while IFS=$'\t' read -r groupId groupName; do
     echo "$groupId" "$groupName"
 done | xargs -L1 -P"$PARALLEL" bash -c 'process_group "$1" "$2"' --
 
@@ -392,7 +351,6 @@ rm -f "$TMP_DIR"/aad_groups_* "${PROGRESS_COUNTER}"_*
 # -------------------------
 # Consolidate logs
 # -------------------------
-echo
 echo "📝 Consolidating logs..."
 if ls "${TMP_DIR}"/*.txt >/dev/null 2>&1; then
     cat "${TMP_DIR}"/*.txt > "$FINAL_LOG" 2>&1
@@ -406,9 +364,9 @@ fi
 # -------------------------
 TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
 GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
-TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ",user\"" | wc -l)
-TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ",spn\"" | wc -l)
-TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ",uami\"" | wc -l)
+TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ',user"' | wc -l)
+TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ',spn"' | wc -l)
+TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ',uami"' | wc -l)
 
 # -------------------------
 # Done
