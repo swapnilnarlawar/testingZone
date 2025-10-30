@@ -369,11 +369,11 @@ fi
 # Summary statistics
 # -------------------------
 if [[ -f "$CSV_FILE" ]] && [[ $(wc -l < "$CSV_FILE") -gt 1 ]]; then
-    TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
+    TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v '"No members"' | wc -l)
     GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
-    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ',user"' | wc -l)
-    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ',spn"' | wc -l)
-    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ',uami"' | wc -l)
+    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ',"user"' | wc -l)
+    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ',"spn"' | wc -l)
+    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ',"uami"' | wc -l)
 else
     TOTAL_MEMBERS=0
     GROUPS_WITH_MEMBERS=0
@@ -385,19 +385,21 @@ fi
 # -------------------------
 # Done
 # -------------------------
-echo
-echo "✅ Report complete!"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📊 Summary Statistics:"
-echo "   • Groups processed: $TOTAL_GROUPS"
-echo "   • Groups with members: $GROUPS_WITH_MEMBERS"
-echo "   • Total members: $TOTAL_MEMBERS"
-echo "   • Users: $TOTAL_USERS"
-echo "   • Service Principals: $TOTAL_SPNS"
-echo "   • Managed Identities (UAMIs): $TOTAL_UAMIS"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📄 Table format: $TABLE_FILE"
-echo "📊 CSV format: $CSV_FILE"
-echo "📝 Full log: $FINAL_LOG"
-[[ -f "$ERROR_LOG" ]] && echo "⚠️  Error log: $ERROR_LOG"
-echo
+{
+    echo
+    echo "✅ Report complete!"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📊 Summary Statistics:"
+    echo "   • Groups processed: $TOTAL_GROUPS"
+    echo "   • Groups with members: $GROUPS_WITH_MEMBERS"
+    echo "   • Total members: $TOTAL_MEMBERS"
+    echo "   • Users: $TOTAL_USERS"
+    echo "   • Service Principals: $TOTAL_SPNS"
+    echo "   • Managed Identities (UAMIs): $TOTAL_UAMIS"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📄 Table format: $TABLE_FILE"
+    echo "📊 CSV format: $CSV_FILE"
+    echo "📝 Full log: $FINAL_LOG"
+    [[ -f "$ERROR_LOG" ]] && echo "⚠️  Error log: $ERROR_LOG"
+    echo
+} | tee -a "$FINAL_LOG"
