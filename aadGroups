@@ -358,9 +358,9 @@ rm -f "$TMP_DIR"/aad_groups_* "${PROGRESS_COUNTER}"_*
 # Consolidate logs
 # -------------------------
 echo "📝 Consolidating logs..."
-if ls "${TMP_DIR}"/*.txt >/dev/null 2>&1; then
-    cat "${TMP_DIR}"/*.txt > "$FINAL_LOG" 2>&1
-    rm -f "${TMP_DIR}"/*.txt
+if ls "${TMP_DIR}"/${PREFIX}_log_*.txt >/dev/null 2>&1; then
+    cat "${TMP_DIR}"/${PREFIX}_log_*.txt > "$FINAL_LOG" 2>&1
+    rm -f "${TMP_DIR}"/${PREFIX}_log_*.txt
 else
     echo "No logs to consolidate" > "$FINAL_LOG"
 fi
@@ -368,18 +368,26 @@ fi
 # -------------------------
 # Summary statistics
 # -------------------------
-if [[ -f "$CSV_FILE" ]] && [[ $(wc -l < "$CSV_FILE") -gt 1 ]]; then
-    TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v '"No members"' | wc -l)
-    GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | cut -d',' -f1 | sort -u | wc -l)
-    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | grep -i ',"user"' | wc -l)
-    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | grep -i ',"spn"' | wc -l)
-    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | grep -i ',"uami"' | wc -l)
-else
-    TOTAL_MEMBERS=0
-    GROUPS_WITH_MEMBERS=0
-    TOTAL_USERS=0
-    TOTAL_SPNS=0
-    TOTAL_UAMIS=0
+echo "📊 Calculating summary statistics..."
+
+TOTAL_MEMBERS=0
+GROUPS_WITH_MEMBERS=0
+TOTAL_USERS=0
+TOTAL_SPNS=0
+TOTAL_UAMIS=0
+
+if [[ -f "$CSV_FILE" ]]; then
+    # Count all non-header lines that aren't "No members"
+    TOTAL_LINES=$(tail -n +2 "$CSV_FILE" | wc -l)
+    TOTAL_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | wc -l)
+    
+    # Count unique groups with members
+    GROUPS_WITH_MEMBERS=$(tail -n +2 "$CSV_FILE" | grep -v "No members" | cut -d',' -f1 | sort -u | wc -l)
+    
+    # Count by type - look for the last column which has the object type
+    TOTAL_USERS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "user" | wc -l)
+    TOTAL_SPNS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "spn" | wc -l)
+    TOTAL_UAMIS=$(tail -n +2 "$CSV_FILE" | awk -F',' '{print $NF}' | grep -i "uami" | wc -l)
 fi
 
 # -------------------------
