@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+import re
+import argparse
+import logging
+import os
+import shutil
+import shlex
+import json
+import sys
+from collections import OrderedDict, Counter
+import difflib
+from pathlib import Path
+
+# ANSI color codes
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+CYAN = "\033[96m"
+MAGENTA = "\033[95m"
+RESET = "\033[0m"
+
+# Enhanced regex for "export VAR=value" with various quote styles
+EXPORT_RE = re.compile(r"^export\s+([A-Za-z_]\w*)=(.*)$")
+VAR_REF_RE = re.compile(r'\$\{?([A-Za-z_]\w*)\}?')
+
+# Critical environment variables that should be validated
+CRITICAL_VARS = {'PATH', 'LD_LIBRARY_PATH', 'HOME', 'USER', 'SHELL'}
+
+class ConfigMergerStats:
+    """Track statistics for the merge operation."""
+    def __init__(self):
+        self.total_vars_a = 0
+        self.total_vars_b = 0
+        self.conflicts = 0
+        self.additions = 0
+        self.preserved = 0
+        self.duplicates_in_a = []
+        self.duplicates_in_b = []
+        self.dangerous_values = []
+        self.var_references = []
+        
+    def to_dict(self):
+        return {
+            'total_variables_in_configA': self.total_vars_a,
+            'total_variables_in_configB': self.total_vars_b,
+            'conflicts_resolved': self.conflicts,
+            'variables_added_from_B': self.additions,
+            'variables_preserved_from_A': self.preserved,
+            'duplicates_in_configA': self.duplicates_in_a,
+            'duplicates_in_configB': self.duplicates_in_b,
+            'dangerous_values': self.dangerous_values,
+            'variable_references': self.var_references
+        }
+    
+    def print_summary(self):
+        print(f"\n{CYAN}=== Merge Statistics ==={RESET}")
+        print(f"  Variables in configA: {self.total_vars_a}")
+        print(f"  Variables in configB: {self.total_vars_b}")
+        print(f"  {YELLOW}Conflicts resolved: {self.conflicts}{RESET}")
+        print(f"  {GREEN}Variables added from B: {self.additions}{RESET}")
+        print(f"  Variables preserved from A: {self.preserved}")
+        
+        if self.duplicates_in_a:
+            print(f"  {RED}Duplicates in configA: {len(self.duplicates_in_a)}{RESET}")
+        if self.duplicates_in_b:
+            print(f"  {RED}Duplicates in configB: {len(self.duplicates_in_b)}{RESET}")
+        if self.dangerous_values:
+            print(f"  {RED}⚠ Dangerous values detected: {len(self.dangerous_values)}{RESET}")
+        if self.var_references:
+            print(f"  {MAGENTA}Variable references found: {len(self.var_references)}{RESET}")
+
+def setup_logging(warnings_only=False, verbose=False):
+    if warnings_only:
+        level = logging.WARNING
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+
+def load_config_file(path='.configmergerrc'):
+    """Load configuration from rc file."""
+    config = {}
+    rc_path = Path(path)
+    
+    if rc_path.exists():
+        try:
+            with open(rc_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        if '=' in line:
+                            key, value = line.split('=', 1)
+                            key = key.strip()
+                            value = value.strip().strip('"\'')
+                            
+                            # Convert boolean strings
+                            if value.lower() in ('true', 'yes', '1'):
+                                value = True
+                            elif value.lower() in ('false', 'no', '0'):
+                                value = False
+                            
+                            config[key] = value
+            logging.debug(f"Loaded configuration from {rc_path}")
+        except Exception as e:
+            logging.warning(f"Failed to load {rc_path}: {e}")
+    
+    return config
+
+def extract_value_and_comment(value_part):
+    """
+    Extract the actual value and comment from the part after '='.
+    Handles quoted and unquoted values, respecting quotes for comments.
+    """
+    value_part = value_part.strip()
+    
+    if value_part.startswith("'"):
+        # Single-quoted: find matching close quote
+        try:
+            end_idx = value_part.index("'", 1)
+            value = value_part[1:end_idx]
+            remainder = value_part[end_idx + 1:].strip()
+            comment = remainder if remainder.startswith("#") else ""
+            return value, comment
+        except ValueError:
+            return value_part[1:], ""
+    elif value_part.startswith('"'):
+        # Double-quoted: need to handle escapes
+        idx = 1
+        chars = []
+        while idx < len(value_part):
+            if value_part[idx] == '\\' and idx + 1 < len(value_part):
+                next_char = value_part[idx + 1]
+                if next_char in ('"', '\\', '$', '`', '\n'):
+                    chars.append(next_char)
+                    idx += 2
+                else:
+                    chars.append('\\')
+                    idx += 1
+            elif value_part[idx] == '"':
+                value = ''.join(chars)
+                remainder = value_part[idx + 1:].strip()
+                comment = remainder if remainder.startswith("#") else ""
+                return value, comment
+            else:
+                chars.append(value_part[idx])
+                idx += 1
+        return ''.join(chars), ""
+    else:
+        # Unquoted value
+        comment_match = re.search(r'\s+(#.*)$', value_part)
+        if comment_match:
+            comment = comment_match.group(1)
+            value = value_part[:comment_match.start()].strip()
+        else:
+            value = value_part.strip()
+            comment = ""
+        
+        return value, comment
+
+def find_variable_references(value):
+    """Find all variable references in a value."""
+    return VAR_REF_RE.findall(value)
+
+def validate_variable_name(var_name):
+    """Check if variable name is valid."""
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', var_name):
+        return False, f"Invalid variable name: {var_name}"
+    return True, None
+
+def check_dangerous_value(var, value):
+    """Check if a value might be dangerous."""
+    warnings = []
+    
+    # Check critical variables
+    if var in CRITICAL_VARS:
+        if not value or value.isspace():
+            warnings.append(f"{var} is empty or whitespace")
+        elif var == 'PATH' and not value.startswith('/'):
+            warnings.append(f"{var} doesn't start with absolute path")
+    
+    # Check for potential command injection
+    if any(char in value for char in ['`', '$(', ';', '|', '&']):
+        warnings.append(f"{var} contains potentially dangerous characters")
+    
+    return warnings
+
+def parse_config_lines(file_path, stats=None):
+    """Parse only 'export VAR=...' lines with validation."""
+    config = OrderedDict()
+    lines = []
+    var_occurrences = Counter()
+    duplicates = []
+    
+    try:
+        with open(file_path) as f:
+            line_num = 0
+            for line in f:
+                line_num += 1
+                line = line.rstrip("\n")
+                lines.append(line)
+                match = EXPORT_RE.match(line.strip())
+                if match:
+                    var = match.group(1)
+                    value_part = match.group(2)
+                    val, comment = extract_value_and_comment(value_part)
+                    
+                    # Track occurrences
+                    var_occurrences[var] += 1
+                    if var_occurrences[var] > 1:
+                        duplicates.append(var)
+                        logging.warning(f"Duplicate variable '{var}' at line {line_num} in {file_path}")
+                    
+                    # Validate variable name
+                    is_valid, error = validate_variable_name(var)
+                    if not is_valid:
+                        logging.warning(f"Line {line_num}: {error}")
+                    
+                    # Check for variable references
+                    var_refs = find_variable_references(val)
+                    if var_refs and stats:
+                        for ref in var_refs:
+                            stats.var_references.append((var, ref, val))
+                        logging.debug(f"Variable '{var}' references: {var_refs}")
+                    
+                    # Check for dangerous values
+                    dangers = check_dangerous_value(var, val)
+                    if dangers and stats:
+                        for danger in dangers:
+                            stats.dangerous_values.append(danger)
+                            logging.warning(f"⚠ {danger}")
+                    
+                    config[var] = (val, comment)
+    except FileNotFoundError:
+        logging.error(f"File not found: {file_path}")
+        raise
+    except Exception as e:
+        logging.error(f"Error reading {file_path}: {e}")
+        raise
+    
+    return config, lines, duplicates
+
+def merge_configs(configA, configB, merge_strategy='prefer-a', fileA_name="configA", fileB_name="configB"):
+    """
+    Merge two config dicts with configurable strategy.
+    
+    Strategies:
+    - 'prefer-a': configA takes precedence (default)
+    - 'prefer-b': configB takes precedence
+    - 'merge-comments': Combine comments from both
+    """
+    merged = OrderedDict()
+    conflicts = []
+    
+    all_keys = list(configA.keys()) + [k for k in configB.keys() if k not in configA]
+    
+    for k in all_keys:
+        valA, commentA = configA.get(k, (None, ""))
+        valB, commentB = configB.get(k, (None, ""))
+        
+        if k in configA and k in configB:
+            if valA != valB:
+                conflicts.append((k, valA, valB))
+                if merge_strategy == 'prefer-a':
+                    val = valA
+                    logging.warning(f"Variable '{k}' differs (A='{valA}' vs B='{valB}'); keeping value from {fileA_name}")
+                elif merge_strategy == 'prefer-b':
+                    val = valB
+                    logging.warning(f"Variable '{k}' differs (A='{valA}' vs B='{valB}'); keeping value from {fileB_name}")
+                else:
+                    val = valA  # default to A
+            else:
+                val = valA
+            
+            # Merge comments if strategy requests it
+            if merge_strategy == 'merge-comments' and commentA and commentB and commentA != commentB:
+                comment = f"{commentA} | {commentB}"
+            else:
+                comment = commentA or commentB
+        else:
+            val = valA if k in configA else valB
+            comment = commentA or commentB
+        
+        merged[k] = (val, comment)
+    
+    return merged, conflicts
+
+def validate_output_path(output_path):
+    """Validate that the output path is writable."""
+    output_dir = os.path.dirname(output_path) or "."
+    
+    if not os.path.exists(output_dir):
+        logging.error(f"Output directory does not exist: {output_dir}")
+        return False
+    
+    if not os.access(output_dir, os.W_OK):
+        logging.error(f"Output directory is not writable: {output_dir}")
+        return False
+    
+    if os.path.exists(output_path) and not os.access(output_path, os.W_OK):
+        logging.error(f"Output file exists but is not writable: {output_path}")
+        return False
+    
+    return True
+
+def create_backup(file_path, backup_suffix='.bak'):
+    """Create a backup of the file."""
+    if os.path.exists(file_path):
+        backup_path = file_path + backup_suffix
+        try:
+            shutil.copy2(file_path, backup_path)
+            logging.info(f"Created backup: {backup_path}")
+            return backup_path
+        except Exception as e:
+            logging.warning(f"Failed to create backup: {e}")
+            return None
+    return None
+
+def write_combined_config(fileA_lines, configA, configB, output_path, base_path, 
+                         merge_strategy='prefer-a', dry_run=False, create_backup_file=False,
+                         write_conflicts=False):
+    """Write merged configuration with proper error handling."""
+    if not validate_output_path(output_path):
+        raise PermissionError(f"Cannot write to {output_path}")
+    
+    # Create backup if requested
+    if create_backup_file and os.path.exists(output_path) and not dry_run:
+        create_backup(output_path)
+    
+    merged, conflicts = merge_configs(configA, configB, merge_strategy)
+    written_vars = set()
+    
+    if dry_run:
+        logging.info(f"DRY RUN: Would write to {output_path}")
+        return conflicts
+    
+    try:
+        with open(output_path, "w") as out:
+            for line in fileA_lines:
+                match = EXPORT_RE.match(line.strip())
+                if match:
+                    var = match.group(1)
+                    val, comment = merged.get(var, ("", ""))
+                    comment_part = f" {comment}" if comment else ""
+                    escaped_val = val.replace("'", "'\"'\"'")
+                    out.write(f"export {var}='{escaped_val}'{comment_part}\n")
+                    written_vars.add(var)
+                else:
+                    out.write(line + "\n")
+            
+            # Add variables from configB that weren't in configA
+            for var, (val, comment) in configB.items():
+                if var not in written_vars:
+                    comment_part = f" {comment}" if comment else ""
+                    escaped_val = val.replace("'", "'\"'\"'")
+                    out.write(f"export {var}='{escaped_val}'{comment_part}\n")
+        
+        # Write conflicts file if requested
+        if write_conflicts and conflicts:
+            conflicts_path = output_path + '.conflicts'
+            with open(conflicts_path, 'w') as cf:
+                cf.write("# Configuration Merge Conflicts\n")
+                cf.write(f"# Generated for: {output_path}\n\n")
+                for var, valA, valB in conflicts:
+                    cf.write(f"<<<<<<< configA\n")
+                    cf.write(f"export {var}='{valA}'\n")
+                    cf.write(f"=======\n")
+                    cf.write(f"export {var}='{valB}'\n")
+                    cf.write(f">>>>>>> configB\n\n")
+            logging.info(f"Conflicts written to: {conflicts_path}")
+        
+        # Preserve permissions and timestamps
+        if os.path.exists(base_path):
+            try:
+                shutil.copystat(base_path, output_path)
+            except (OSError, PermissionError) as e:
+                logging.warning(f"Could not preserve file metadata: {e}")
+        
+        logging.info(f"✅ Combined config written to {output_path}")
+        return conflicts
+    except Exception as e:
+        logging.error(f"Failed to write {output_path}: {e}")
+        raise
+
+def print_context_diff(configA, configB, configMerged):
+    """Show comprehensive unified diff-style output."""
+    all_keys = sorted(set(configA.keys()).union(configB.keys()).union(configMerged.keys()))
+    
+    linesA = []
+    linesM = []
+    
+    for k in all_keys:
+        valA, commentA = configA.get(k, (None, ""))
+        valM, commentM = configMerged.get(k, (None, ""))
+        
+        if valA is not None:
+            lineA = f"export {k}='{valA}'"
+            if commentA:
+                lineA += f" {commentA}"
+            linesA.append(lineA)
+        
+        if valM is not None:
+            lineM = f"export {k}='{valM}'"
+            if commentM:
+                lineM += f" {commentM}"
+            linesM.append(lineM)
+    
+    diff = difflib.unified_diff(
+        linesA,
+        linesM,
+        fromfile='Original (configA)',
+        tofile='Merged Result',
+        lineterm=''
+    )
+    
+    print(f"\n{CYAN}=== Configuration Diff ==={RESET}")
+    has_changes = False
+    for line in diff:
+        has_changes = True
+        if line.startswith('---') or line.startswith('+++'):
+            print(f"{CYAN}{line}{RESET}")
+        elif line.startswith('@@'):
+            print(f"{CYAN}{line}{RESET}")
+        elif line.startswith('-'):
+            print(f"{RED}{line}{RESET}")
+        elif line.startswith('+'):
+            print(f"{GREEN}{line}{RESET}")
+        else:
+            print(line)
+    
+    if not has_changes:
+        print(f"{CYAN}No changes detected.{RESET}")
+    
+    only_in_b = set(configB.keys()) - set(configA.keys())
+    if only_in_b:
+        print(f"\n{YELLOW}Variables added from configB:{RESET}")
+        for var in sorted(only_in_b):
+            val, comment = configB[var]
+            print(f"  {GREEN}+ {var}='{val}'{RESET}")
+
+def run_tests():
+    """Comprehensive test suite."""
+    import tempfile
+    import textwrap
+    
+    print(f"\n{CYAN}Running tests...{RESET}\n")
+    
+    # Test 1: Basic merge with conflicts
+    print("Test 1: Basic merge with conflicts...")
+    configA = textwrap.dedent("""\
+        export VAR1='A1' # comment1
+        export VAR2='' 
+        export VAR3='keep' # keep me
+        """)
+    configB = textwrap.dedent("""\
+        export VAR1='B1'
+        export VAR2='B2'
+        export VAR4='B4'
+        """)
+    
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "A.sh")
+        b = os.path.join(tmp, "B.sh")
+        o = os.path.join(tmp, "out.sh")
+        
+        with open(a, "w") as f:
+            f.write(configA)
+        with open(b, "w") as f:
+            f.write(configB)
+        
+        stats = ConfigMergerStats()
+        cfgA, linesA, _ = parse_config_lines(a, stats)
+        cfgB, _, _ = parse_config_lines(b, stats)
+        conflicts = write_combined_config(linesA, cfgA, cfgB, o, a)
+        
+        assert len(conflicts) == 2, f"Expected 2 conflicts, got {len(conflicts)}"
+        
+        cfgMerged, _, _ = parse_config_lines(o)
+        out = open(o).read()
+        
+        assert "VAR1='A1'" in out
+        assert "VAR2=''" in out
+        assert "VAR3='keep'" in out
+        assert "VAR4='B4'" in out
+        print(f"  {GREEN}✓ Basic merge test passed{RESET}")
+    
+    # Test 2: Prefer B strategy
+    print("Test 2: Prefer B merge strategy...")
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "A.sh")
+        b = os.path.join(tmp, "B.sh")
+        o = os.path.join(tmp, "out.sh")
+        
+        with open(a, "w") as f:
+            f.write("export VAR1='A1'\n")
+        with open(b, "w") as f:
+            f.write("export VAR1='B1'\n")
+        
+        cfgA, linesA, _ = parse_config_lines(a)
+        cfgB, _, _ = parse_config_lines(b)
+        write_combined_config(linesA, cfgA, cfgB, o, a, merge_strategy='prefer-b')
+        
+        out = open(o).read()
+        assert "VAR1='B1'" in out
+        print(f"  {GREEN}✓ Prefer B strategy test passed{RESET}")
+    
+    # Test 3: Dry run mode
+    print("Test 3: Dry run mode...")
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "A.sh")
+        b = os.path.join(tmp, "B.sh")
+        o = os.path.join(tmp, "out.sh")
+        
+        with open(a, "w") as f:
+            f.write("export VAR1='A1'\n")
+        with open(b, "w") as f:
+            f.write("export VAR2='B2'\n")
+        
+        cfgA, linesA, _ = parse_config_lines(a)
+        cfgB, _, _ = parse_config_lines(b)
+        write_combined_config(linesA, cfgA, cfgB, o, a, dry_run=True)
+        
+        assert not os.path.exists(o), "Output file should not exist in dry run"
+        print(f"  {GREEN}✓ Dry run test passed{RESET}")
+    
+    # Test 4: Backup creation
+    print("Test 4: Backup creation...")
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "A.sh")
+        b = os.path.join(tmp, "B.sh")
+        o = os.path.join(tmp, "out.sh")
+        
+        with open(a, "w") as f:
+            f.write("export VAR1='A1'\n")
+        with open(b, "w") as f:
+            f.write("export VAR2='B2'\n")
+        with open(o, "w") as f:
+            f.write("export VAR1='OLD'\n")
+        
+        cfgA, linesA, _ = parse_config_lines(a)
+        cfgB, _, _ = parse_config_lines(b)
+        write_combined_config(linesA, cfgA, cfgB, o, a, create_backup_file=True)
+        
+        backup_path = o + '.bak'
+        assert os.path.exists(backup_path), "Backup file should exist"
+        backup_content = open(backup_path).read()
+        assert "VAR1='OLD'" in backup_content
+        print(f"  {GREEN}✓ Backup creation test passed{RESET}")
+    
+    # Test 5: Variable reference detection
+    print("Test 5: Variable reference detection...")
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "A.sh")
+        with open(a, "w") as f:
+            f.write("export PATH='$HOME/bin:$PATH'\n")
+            f.write("export VAR='${OTHER_VAR}/subdir'\n")
+        
+        stats = ConfigMergerStats()
+        cfgA, _, _ = parse_config_lines(a, stats)
+        
+        assert len(stats.var_references) >= 2
+        print(f"  {GREEN}✓ Variable reference detection test passed{RESET}")
+    
+    # Test 6: Dangerous value detection
+    print("Test 6: Dangerous value detection...")
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "A.sh")
+        with open(a, "w") as f:
+            f.write("export PATH=''\n")
+        
+        stats = ConfigMergerStats()
+        cfgA, _, _ = parse_config_lines(a, stats)
+        
+        assert len(stats.dangerous_values) > 0
+        print(f"  {GREEN}✓ Dangerous value detection test passed{RESET}")
+    
+    # Test 7: Conflict file generation
+    print("Test 7: Conflict file generation...")
+    with tempfile.TemporaryDirectory() as tmp:
+        a = os.path.join(tmp, "A.sh")
+        b = os.path.join(tmp, "B.sh")
+        o = os.path.join(tmp, "out.sh")
+        
+        with open(a, "w") as f:
+            f.write("export VAR1='A1'\n")
+        with open(b, "w") as f:
+            f.write("export VAR1='B1'\n")
+        
+        cfgA, linesA, _ = parse_config_lines(a)
+        cfgB, _, _ = parse_config_lines(b)
+        write_combined_config(linesA, cfgA, cfgB, o, a, write_conflicts=True)
+        
+        conflicts_path = o + '.conflicts'
+        assert os.path.exists(conflicts_path)
+        conflict_content = open(conflicts_path).read()
+        assert '<<<<<<< configA' in conflict_content
+        assert '=======' in conflict_content
+        assert '>>>>>>> configB' in conflict_content
+        print(f"  {GREEN}✓ Conflict file generation test passed{RESET}")
+    
+    print(f"\n{GREEN}✅ All tests passed!{RESET}\n")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Advanced bash export config merger with validation and conflict resolution."
+    )
+    parser.add_argument("-a", "--configA", default="configA.sh",
+                        help="First config file (takes precedence by default)")
+    parser.add_argument("-b", "--configB", default="configB.sh",
+                        help="Second config file")
+    parser.add_argument("-o", "--output", default="combined_config.sh",
+                        help="Output file path")
+    parser.add_argument("--test", action="store_true",
+                        help="Run comprehensive test suite")
+    parser.add_argument("--show-warnings-only", action="store_true",
+                        help="Only show warning messages")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Show detailed debug information")
+    parser.add_argument("--diff", action="store_true",
+                        help="Show unified-style diff of changes")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show what would change without writing files")
+    parser.add_argument("--backup", action="store_true",
+                        help="Create backup (.bak) of output file before overwriting")
+    parser.add_argument("--merge-strategy", choices=['prefer-a', 'prefer-b', 'merge-comments'],
+                        default='prefer-a',
+                        help="Strategy for resolving conflicts (default: prefer-a)")
+    parser.add_argument("--write-conflicts", action="store_true",
+                        help="Write conflicts to .conflicts file in git-style format")
+    parser.add_argument("--strict", action="store_true",
+                        help="Exit with error code if conflicts exist")
+    parser.add_argument("--json", action="store_true",
+                        help="Output statistics in JSON format")
+    parser.add_argument("--config", default=".configmergerrc",
+                        help="Path to configuration file (default: .configmergerrc)")
+    
+    args = parser.parse_args()
+    
+    # Load RC file configuration
+    rc_config = load_config_file(args.config)
+    
+    # Override with RC file values if not specified on command line
+    for key, value in rc_config.items():
+        arg_name = key.replace('-', '_')
+        if hasattr(args, arg_name) and getattr(args, arg_name) == parser.get_default(key.replace('_', '-')):
+            setattr(args, arg_name, value)
+    
+    setup_logging(args.show_warnings_only, args.verbose)
+
+    if args.test:
+        run_tests()
+    else:
+        try:
+            stats = ConfigMergerStats()
+            
+            cfgA, linesA, dupsA = parse_config_lines(args.configA, stats)
+            stats.total_vars_a = len(cfgA)
+            stats.duplicates_in_a = dupsA
+            
+            cfgB, _, dupsB = parse_config_lines(args.configB, stats)
+            stats.total_vars_b = len(cfgB)
+            stats.duplicates_in_b = dupsB
+            
+            conflicts = write_combined_config(
+                linesA, cfgA, cfgB, args.output, args.configA,
+                merge_strategy=args.merge_strategy,
+                dry_run=args.dry_run,
+                create_backup_file=args.backup,
+                write_conflicts=args.write_conflicts
+            )
+            
+            stats.conflicts = len(conflicts)
+            stats.additions = len(set(cfgB.keys()) - set(cfgA.keys()))
+            stats.preserved = len(set(cfgA.keys()) & set(cfgB.keys())) - len(conflicts)
+            
+            if args.diff and not args.dry_run:
+                cfgMerged, _, _ = parse_config_lines(args.output)
+                print_context_diff(cfgA, cfgB, cfgMerged)
+            
+            if args.json:
+                print(json.dumps(stats.to_dict(), indent=2))
+            elif args.verbose or not args.show_warnings_only:
+                stats.print_summary()
+            
+            # Exit with error if strict mode and conflicts exist
+            if args.strict and conflicts:
+                logging.error(f"Strict mode: {len(conflicts)} conflicts detected")
+                sys.exit(1)
+                
+        except Exception as e:
+            logging.error(f"Merge failed: {e}")
+            sys.exit(1)
