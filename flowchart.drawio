@@ -1,0 +1,62 @@
+---
+config:
+  theme: forest
+  look: classic
+---
+flowchart TD
+    Start([Start]) ==> TenantGroupAdmin(TenantGroupAdmin)
+
+    subgraph TenantGroupAdmin ["<br>**Tenant Group Admin**<br>"]
+        
+        subgraph TGA_PrepContainer ["<br>Tenant Group Prep Activities"]
+            TGA_PrepStep1("TGA Prepare Resources")
+            TGA_PrepStep2("TGA Validate Requirements")
+            TGA_PrepStep3("TGA Onboarding")
+            TGA_PrepStep1 --> TGA_PrepStep2
+            TGA_PrepStep1 & TGA_PrepStep3 --> TGA_PrepStep2
+        end
+        
+        TGA_PrepContainer --> TGA_Execution(Execute TGA Pipeline)
+        
+        subgraph TGA_PostContainer ["Tenant Group Post Activites"]
+            TGA_PostStep1(TGA Process Results)
+            TGA_PostStep2(TGA Generate Reports)
+            TGA_PostStep1 --> TGA_PostStep2
+        end
+        
+        TGA_Execution --> TGA_PostContainer
+    end
+
+    TenantGroupAdmin ==> TenantGroup
+    
+    subgraph TenantGroup ["<br>Each Tenant"]
+
+        subgraph Tenant_PrepContainer ["Tenant Prep Activities"]
+            Tenant_PrepStep1("Tenant Prepare Resources")
+            Tenant_PrepStep2("Tenant Validate Requirements")
+            Tenant_PrepStep1 --> Tenant_PrepStep2
+        end
+
+        Tenant_PrepContainer --> Tenant_Execution(Execute Tenant Pipeline)
+
+        subgraph Tenant_PostContainer ["Tenant Post Activities"]
+            Tenant_PostStep1(Tenant Process Results)
+            Tenant_PostStep2(Tenant Generate Reports)
+            Tenant_PostStep1 --> Tenant_PostStep2
+        end
+
+        Tenant_Execution --> Tenant_PostContainer
+
+        Tenant_PostContainer --> Tenant_Deployment(Service Deployment)
+        
+    end
+    
+    TenantGroup ==> End([End])
+
+    click TGA_PrepStep1 "https://placeholder.url" "TGA Prepare Resources"
+    click TGA_PrepStep2 "https://placeholder.url" "TGA Validate Requirements"
+    click Tenant_PrepStep1 "https://placeholder.url" "Tenant Prepare Resources"
+    click Tenant_PrepStep2 "https://placeholder.url" "Tenant Validate Requirements"
+
+    classDef roundedSubgraph fill:#f9f9f9,stroke:#333,stroke-width:2px,rx:15,ry:15
+    class TenantGroupAdmin,TGA_PrepContainer,TGA_PostContainer,TenantGroup,Tenant_PrepContainer,Tenant_PostContainer roundedSubgraph
