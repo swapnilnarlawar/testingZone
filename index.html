@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Config Generator — v1</title>
+<style>
+/* ─── Design tokens ─────────────────────────────────────────── */
+:root {
+  --bg:         #f5f5f4;
+  --surface:    #ffffff;
+  --surface-2:  #f0efed;
+  --surface-3:  #e7e5e4;
+  --text:       #1c1917;
+  --text-2:     #57534e;
+  --text-3:     #a8a29e;
+  --border:     #e7e5e4;
+  --border-2:   #d6d3d1;
+  --shadow:     0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05);
+  --radius:     6px;
+  --radius-lg:  10px;
+  --mono:       ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
+  --sans:       -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  /* Status colours */
+  --new:        #16a34a; --new-bg:   #dcfce7; --new-border:   #bbf7d0;
+  --changed:    #b45309; --changed-bg:#fef3c7; --changed-border:#fde68a;
+  --removed:    #b91c1c; --removed-bg:#fee2e2; --removed-border:#fecaca;
+  --neutral:    #57534e; --neutral-bg:#f5f5f4; --neutral-border:#e7e5e4;
+  --info:       #1d4ed8; --info-bg:   #dbeafe; --info-border:   #bfdbfe;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#131211; --surface:#1c1a19; --surface-2:#242220; --surface-3:#2e2b29;
+    --text:#e7e5e4; --text-2:#a8a29e; --text-3:#78716c;
+    --border:#2e2b29; --border-2:#3d3935;
+    --new:#4ade80; --new-bg:#052e16; --new-border:#14532d;
+    --changed:#fbbf24; --changed-bg:#2d1f02; --changed-border:#713f12;
+    --removed:#f87171; --removed-bg:#2d0a0a; --removed-border:#7f1d1d;
+    --neutral:#a8a29e; --neutral-bg:#1c1a19; --neutral-border:#2e2b29;
+    --info:#60a5fa; --info-bg:#0c1a3a; --info-border:#1e3a8a;
+  }
+}
+/* ─── Reset & base ──────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;-webkit-text-size-adjust:100%}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:1.5;min-height:100vh}
+a{color:var(--info);text-decoration:none}
+a:hover{text-decoration:underline}
+/* ─── Layout ────────────────────────────────────────────────── */
+.wrap{max-width:860px;margin:0 auto;padding:2rem 1.25rem 4rem}
+header{margin-bottom:2.5rem}
+header h1{font-size:1.4rem;font-weight:600;letter-spacing:-.01em;margin-bottom:.25rem}
+header p{color:var(--text-2);font-size:.9rem}
+/* ─── Step indicator ────────────────────────────────────────── */
+.steps{display:flex;align-items:center;gap:0;margin-bottom:2rem;overflow-x:auto;padding-bottom:2px}
+.step{display:flex;align-items:center;gap:.5rem;font-size:.8rem;color:var(--text-3);white-space:nowrap}
+.step-dot{width:22px;height:22px;border-radius:50%;border:1.5px solid var(--border-2);display:flex;align-items:center;justify-content:center;font-size:.7rem;font-weight:600;background:var(--surface);flex-shrink:0;transition:all .2s}
+.step.active{color:var(--text);font-weight:500}
+.step.active .step-dot{background:var(--text);color:var(--surface);border-color:var(--text)}
+.step.done{color:var(--new)}
+.step.done .step-dot{background:var(--new-bg);border-color:var(--new-border);color:var(--new)}
+.step-line{flex:1;min-width:1.5rem;height:1px;background:var(--border);margin:0 .5rem}
+/* ─── Cards ─────────────────────────────────────────────────── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1.25rem;margin-bottom:.75rem;box-shadow:var(--shadow)}
+.card-title{font-size:.85rem;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.875rem}
+/* ─── Tenant type picker ────────────────────────────────────── */
+.type-grid{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+@media(max-width:520px){.type-grid{grid-template-columns:1fr}}
+.type-card{border:1.5px solid var(--border);border-radius:var(--radius-lg);padding:1rem 1.125rem;cursor:pointer;transition:all .15s;background:var(--surface)}
+.type-card:hover{border-color:var(--border-2);background:var(--surface-2)}
+.type-card.selected{border-color:var(--text);background:var(--surface)}
+.type-card h3{font-size:.95rem;font-weight:600;margin-bottom:.3rem}
+.type-card p{font-size:.8rem;color:var(--text-2);line-height:1.5}
+.type-icon{font-size:1.5rem;margin-bottom:.5rem}
+/* ─── Upload zones ──────────────────────────────────────────── */
+.upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+@media(max-width:620px){.upload-grid{grid-template-columns:1fr}}
+.upload-zone{border:1.5px dashed var(--border-2);border-radius:var(--radius-lg);padding:1.25rem;text-align:center;cursor:pointer;transition:all .15s;position:relative}
+.upload-zone:hover,.upload-zone.drag-over{border-color:var(--text-2);background:var(--surface-2)}
+.upload-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer}
+.upload-icon{font-size:1.75rem;margin-bottom:.5rem;color:var(--text-3)}
+.upload-title{font-size:.875rem;font-weight:500;margin-bottom:.25rem}
+.upload-hint{font-size:.775rem;color:var(--text-3)}
+.file-list{margin-top:.75rem;display:flex;flex-wrap:wrap;gap:.4rem;justify-content:center}
+.file-chip{display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .6rem;background:var(--surface-2);border:1px solid var(--border);border-radius:4px;font-size:.775rem;font-family:var(--mono)}
+.file-chip button{background:none;border:none;cursor:pointer;color:var(--text-3);padding:0;line-height:1;font-size:.75rem}
+.file-chip button:hover{color:var(--removed)}
+/* ─── Inputs ────────────────────────────────────────────────── */
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+@media(max-width:520px){.form-row{grid-template-columns:1fr}}
+.form-field{display:flex;flex-direction:column;gap:.35rem}
+.form-field label{font-size:.8rem;font-weight:500;color:var(--text-2)}
+.form-field input{padding:.5rem .75rem;border:1px solid var(--border-2);border-radius:var(--radius);font-size:.875rem;background:var(--surface);color:var(--text);outline:none;font-family:var(--mono);transition:border-color .15s}
+.form-field input:focus{border-color:var(--text-2)}
+.form-field .hint{font-size:.75rem;color:var(--text-3)}
+/* ─── Buttons ───────────────────────────────────────────────── */
+.btn-row{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-top:1.25rem}
+button{font-family:var(--sans);cursor:pointer}
+.btn{display:inline-flex;align-items:center;gap:.4rem;padding:.5rem 1rem;border:1px solid var(--border-2);border-radius:var(--radius);font-size:.875rem;background:var(--surface);color:var(--text);transition:all .15s}
+.btn:hover:not(:disabled){background:var(--surface-2)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:var(--text);color:var(--surface);border-color:transparent}
+.btn-primary:hover:not(:disabled){opacity:.88}
+.btn-sm{padding:.3rem .7rem;font-size:.8rem}
+/* ─── Alert ─────────────────────────────────────────────────── */
+.alert{padding:.75rem 1rem;border-radius:var(--radius);font-size:.85rem;display:flex;gap:.6rem;align-items:flex-start;margin-top:.75rem}
+.alert-info{background:var(--info-bg);border:1px solid var(--info-border);color:var(--info)}
+.alert-warn{background:var(--changed-bg);border:1px solid var(--changed-border);color:var(--changed)}
+.alert-error{background:var(--removed-bg);border:1px solid var(--removed-border);color:var(--removed)}
+/* ─── Summary metrics ───────────────────────────────────────── */
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem;margin-bottom:1rem}
+@media(max-width:480px){.metrics{grid-template-columns:repeat(2,1fr)}}
+.metric{padding:.75rem 1rem;border-radius:var(--radius-lg);text-align:center}
+.metric .num{font-size:1.6rem;font-weight:700;line-height:1;margin-bottom:.2rem}
+.metric .lbl{font-size:.75rem;opacity:.8}
+.metric.m-new{background:var(--new-bg);color:var(--new)}
+.metric.m-changed{background:var(--changed-bg);color:var(--changed)}
+.metric.m-unchanged{background:var(--neutral-bg);color:var(--neutral);border:1px solid var(--neutral-border)}
+.metric.m-removed{background:var(--removed-bg);color:var(--removed)}
+/* ─── Tabs ──────────────────────────────────────────────────── */
+.tabs{display:flex;border-bottom:1px solid var(--border);overflow-x:auto;margin-bottom:0}
+.tab{padding:.5rem .9rem;font-size:.85rem;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-2);white-space:nowrap;background:none;border-top:none;border-left:none;border-right:none;font-family:var(--sans)}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--text);border-bottom-color:var(--text);font-weight:500}
+/* ─── Variable table ────────────────────────────────────────── */
+.var-table-wrap{border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-top:0}
+.var-table-head{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) minmax(0,1fr) 90px;gap:.5rem;padding:.6rem .875rem;background:var(--surface-2);font-size:.75rem;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border)}
+.var-row{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr) minmax(0,1fr) 90px;gap:.5rem;padding:.7rem .875rem;border-bottom:1px solid var(--border);align-items:start;font-size:.85rem;transition:background .1s}
+.var-row:last-child{border-bottom:none}
+.var-row:hover{background:var(--surface-2)}
+.var-row.row-new{background:var(--new-bg)}
+.var-row.row-new:hover{filter:brightness(.97)}
+.var-row.row-changed{background:var(--changed-bg)}
+.var-row.row-changed:hover{filter:brightness(.97)}
+.var-row.row-removed{background:var(--removed-bg);opacity:.7}
+.var-name{font-family:var(--mono);font-size:.8rem;font-weight:500;word-break:break-all}
+.var-comment{font-size:.72rem;color:var(--text-2);margin-top:.15rem;font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.var-value{font-family:var(--mono);font-size:.78rem;color:var(--text-2);word-break:break-all}
+.var-value .placeholder{color:var(--removed);font-weight:500}
+.badge{display:inline-flex;align-items:center;padding:.15rem .55rem;border-radius:4px;font-size:.72rem;font-weight:600;white-space:nowrap}
+.badge-new{background:var(--new-bg);color:var(--new);border:1px solid var(--new-border)}
+.badge-changed{background:var(--changed-bg);color:var(--changed);border:1px solid var(--changed-border)}
+.badge-unchanged{background:var(--neutral-bg);color:var(--neutral);border:1px solid var(--neutral-border)}
+.badge-removed{background:var(--removed-bg);color:var(--removed);border:1px solid var(--removed-border)}
+/* ─── Filter bar ────────────────────────────────────────────── */
+.filter-bar{display:flex;gap:.4rem;flex-wrap:wrap;padding:.6rem .875rem;border-bottom:1px solid var(--border);background:var(--surface)}
+.filter-btn{padding:.25rem .65rem;border-radius:4px;font-size:.775rem;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--text-2);font-family:var(--sans);transition:all .15s}
+.filter-btn:hover{background:var(--surface-2)}
+.filter-btn.active{background:var(--surface-3);color:var(--text);border-color:var(--border-2);font-weight:500}
+/* ─── Generated config pane ─────────────────────────────────── */
+.config-pane{margin-top:1rem}
+.config-pane-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.5rem}
+.config-pane-title{font-size:.85rem;font-weight:500;font-family:var(--mono)}
+.config-pane-actions{display:flex;gap:.5rem}
+.code-block{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1rem;font-family:var(--mono);font-size:.775rem;line-height:1.65;overflow:auto;white-space:pre;max-height:340px;tab-size:2}
+/* Annotation highlights inside code block */
+.ann-new{color:var(--new);font-weight:500}
+.ann-changed{color:var(--changed);font-weight:500}
+.ann-fill{color:var(--removed);font-weight:500}
+.ann-removed{color:var(--text-3)}
+/* ─── No-content placeholder ────────────────────────────────── */
+.empty{padding:2.5rem;text-align:center;color:var(--text-3);font-size:.875rem}
+/* ─── Footer ────────────────────────────────────────────────── */
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);font-size:.78rem;color:var(--text-3)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>⚙ Config Generator <span style="font-weight:400;color:var(--text-3);font-size:.85rem">v1</span></h1>
+  <p>Compare platform release tags and generate annotated <code>.sh</code> config files. No AI, no server, no API keys — runs entirely in your browser.</p>
+</header>
+
+<div class="steps" id="stepBar"></div>
+
+<div id="app"></div>
+
+<footer>Config Generator v1 — runs in your browser. Files are never sent anywhere. &nbsp;·&nbsp; <a href="docs/how-it-works.md" target="_blank">How it works</a></footer>
+
+</div>
+<!-- ─────────────────────────────────────────────────────────── -->
+<script>
+"use strict";
+
+/* ── PARSER ──────────────────────────────────────────────── */
+const SHEBANG   = /^#!(\/usr\/bin\/env\s+)?ba?sh/;
+const VAR_Q     = /^(?:export\s+)?([A-Za-z_]\w*)=(['"])(.*?)\2(?:\s*#.*)?$/;
+const VAR_P     = /^(?:export\s+)?([A-Za-z_]\w*)=(.+?)(?:\s*#.*)?$/;
+const HOLDS_PH  = /TODO|PLACEHOLDER|<YOUR_|<ENTER_|^<[A-Z]/;
+
+function parseShell(content) {
+  const vars = [];
+  const lines = content.split('\n');
+  let pending = [];
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || SHEBANG.test(t)) { if (!t.startsWith('#')) pending = []; continue; }
+    if (t.startsWith('#')) { const c = t.replace(/^#+\s*/, ''); if (c) pending.push(c); continue; }
+
+    const m = t.match(VAR_Q) || t.match(VAR_P);
+    if (m) {
+      vars.push({
+        name:    m[1],
+        value:   (m[3] !== undefined ? m[3] : (m[2] || '')).trim(),
+        comment: pending.join(' ').trim(),
+      });
+    }
+    pending = [];
+  }
+  return vars;
+}
+
+/* ── DIFFER ──────────────────────────────────────────────── */
+function diffVars(oldVars, newVars) {
+  const om = new Map(oldVars.map(v => [v.name, v]));
+  const nm = new Map(newVars.map(v => [v.name, v]));
+  return {
+    added:     newVars.filter(v => !om.has(v.name)),
+    removed:   oldVars.filter(v => !nm.has(v.name)),
+    changed:   newVars
+                 .filter(v => om.has(v.name) && om.get(v.name).value !== v.value)
+                 .map(v => ({ ...v, oldValue: om.get(v.name).value })),
+    unchanged: newVars.filter(v => om.has(v.name) && om.get(v.name).value === v.value),
+  };
+}
+
+/* ── GENERATOR ───────────────────────────────────────────── */
+function quoteVal(v) {
+  if (/[`$"\\!]/.test(v)) return `'${v}'`;
+  return `"${v}"`;
+}
+
+function generateNewTenant(fileName, newVars, stage) {
+  const ts = new Date().toISOString().replace(/\..+/, 'Z');
+  const lines = [
+    '#!/bin/bash',
+    `# ${fileName}`,
+    `# Generated by Config Generator v1 — ${ts}`,
+    `# Tenant type: new${stage ? '\n# Stage: ' + stage : ''}`,
+    '',
+  ];
+  for (const v of newVars) {
+    if (v.comment) lines.push(`# ${v.comment}`);
+    if (HOLDS_PH.test(v.value)) lines.push('# [FILL IN REQUIRED]');
+    lines.push(`export ${v.name}=${quoteVal(v.value)}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+function generateExistingTenant(fileName, diff, oldVars, newVars, stage) {
+  const ts = new Date().toISOString().replace(/\..+/, 'Z');
+  const oldMap     = new Map(oldVars.map(v => [v.name, v]));
+  const changedMap = new Map(diff.changed.map(v => [v.name, v.oldValue]));
+
+  const lines = [
+    '#!/bin/bash',
+    `# ${fileName}`,
+    `# Generated by Config Generator v1 — ${ts}`,
+    `# Tenant type: existing${stage ? '\n# Stage: ' + stage : ''}`,
+    '',
+  ];
+
+  for (const v of newVars) {
+    if (v.comment) lines.push(`# ${v.comment}`);
+    if (!oldMap.has(v.name)) {
+      lines.push('# [NEW - ACTION REQUIRED]');
+      if (HOLDS_PH.test(v.value)) lines.push('# [FILL IN REQUIRED]');
+      lines.push(`export ${v.name}=${quoteVal(v.value)}`);
+    } else if (changedMap.has(v.name)) {
+      lines.push(`# [CHANGED - was: ${changedMap.get(v.name)}]`);
+      lines.push(`export ${v.name}=${quoteVal(v.value)}`);
+    } else {
+      lines.push(`export ${v.name}=${quoteVal(oldMap.get(v.name).value)}`);
+    }
+    lines.push('');
+  }
+
+  if (diff.removed.length) {
+    lines.push('# ──────────────────────────────────────────────────────');
+    lines.push('# REMOVED IN THIS RELEASE — delete from your deployed config:');
+    for (const r of diff.removed) lines.push(`#   ${r.name}=${quoteVal(r.value)}`);
+    lines.push('# ──────────────────────────────────────────────────────');
+  }
+
+  return lines.join('\n');
+}
+
+/* ── STATE ───────────────────────────────────────────────── */
+const st = {
+  step:        1,
+  tenantType:  null,    // 'new' | 'existing'
+  newFiles:    [],      // [{name, content, vars}]
+  oldFiles:    [],      // [{name, content, vars}]
+  stageName:   '',
+  results:     null,    // computed after Generate click
+  activeTab:   0,
+  filter:      'all',
+  copied:      null,
+};
+
+function readFile(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload  = e => res({ name: file.name, content: e.target.result });
+    r.onerror = () => rej(new Error('Failed to read ' + file.name));
+    r.readAsText(file);
+  });
+}
+
+async function addFiles(fileList, target) {
+  const files = Array.from(fileList).filter(f => f.name.endsWith('.sh'));
+  if (!files.length) return;
+  const read  = await Promise.all(files.map(readFile));
+  const names = new Set(st[target].map(f => f.name));
+  const fresh = read.filter(f => !names.has(f.name));
+  fresh.forEach(f => f.vars = parseShell(f.content));
+  st[target].push(...fresh);
+  render();
+}
+
+function removeFile(target, name) {
+  st[target] = st[target].filter(f => f.name !== name);
+  st.results = null;
+  render();
+}
+
+/* ── COMPUTE RESULTS ─────────────────────────────────────── */
+function computeResults() {
+  if (!st.newFiles.length) return;
+
+  const oldMap = new Map(st.oldFiles.map(f => [f.name, f]));
+  let totalNew = 0, totalChanged = 0, totalUnchanged = 0, totalRemoved = 0;
+  const files = [];
+
+  for (const nf of st.newFiles) {
+    const of_ = oldMap.get(nf.name);
+    const oldVars = of_ ? of_.vars : [];
+
+    let diff_, generated, variables;
+
+    if (st.tenantType === 'new') {
+      generated = generateNewTenant(nf.name, nf.vars, st.stageName);
+      variables = nf.vars.map(v => ({ ...v, status: 'new', oldValue: '' }));
+      totalNew += nf.vars.length;
+    } else {
+      diff_ = diffVars(oldVars, nf.vars);
+      generated = generateExistingTenant(nf.name, diff_, oldVars, nf.vars, st.stageName);
+      totalNew       += diff_.added.length;
+      totalChanged   += diff_.changed.length;
+      totalUnchanged += diff_.unchanged.length;
+      totalRemoved   += diff_.removed.length;
+
+      const addedSet   = new Set(diff_.added.map(v => v.name));
+      const changedMap = new Map(diff_.changed.map(v => [v.name, v.oldValue]));
+      const removedSet = new Set(diff_.removed.map(v => v.name));
+
+      variables = [
+        ...nf.vars.map(v => ({
+          ...v,
+          status:   addedSet.has(v.name) ? 'new' : changedMap.has(v.name) ? 'changed' : 'unchanged',
+          oldValue: changedMap.get(v.name) || '',
+        })),
+        ...diff_.removed.map(v => ({ ...v, status: 'removed', oldValue: v.value, value: '' })),
+      ];
+    }
+
+    files.push({ name: nf.name, variables, generated });
+  }
+
+  st.results = {
+    summary: {
+      newCount:       totalNew,
+      changedCount:   totalChanged,
+      unchangedCount: totalUnchanged,
+      removedCount:   totalRemoved,
+    },
+    files,
+  };
+  st.activeTab = 0;
+  st.filter    = 'all';
+}
+
+/* ── UTILS ───────────────────────────────────────────────── */
+function esc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function highlightConfig(content) {
+  return esc(content)
+    .replace(/^(# \[NEW.*\])$/gm,     '<span class="ann-new">$1</span>')
+    .replace(/^(# \[CHANGED.*\])$/gm, '<span class="ann-changed">$1</span>')
+    .replace(/^(# \[FILL.*\])$/gm,    '<span class="ann-fill">$1</span>')
+    .replace(/^(# REMOVED.*|#   .*)$/gm, '<span class="ann-removed">$1</span>');
+}
+
+function downloadFile(content, name) {
+  const blob = new Blob([content], { type: 'text/plain' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function copyText(text, key) {
+  navigator.clipboard.writeText(text);
+  st.copied = key;
+  render();
+  setTimeout(() => { st.copied = null; render(); }, 1800);
+}
+
+/* ── RENDER ──────────────────────────────────────────────── */
+const STEP_LABELS = ['Tenant type', 'Upload files', 'Results'];
+
+function renderSteps() {
+  const bar = document.getElementById('stepBar');
+  bar.innerHTML = STEP_LABELS.map((label, i) => {
+    const n = i + 1;
+    const cls = n < st.step ? 'done' : n === st.step ? 'active' : '';
+    const dot = n < st.step ? '✓' : n;
+    return `${i > 0 ? '<div class="step-line"></div>' : ''}
+      <div class="step ${cls}">
+        <div class="step-dot">${dot}</div>
+        <span>${label}</span>
+      </div>`;
+  }).join('');
+}
+
+function renderApp() {
+  const app = document.getElementById('app');
+  if (st.step === 1) { app.innerHTML = renderStep1(); return; }
+  if (st.step === 2) { app.innerHTML = renderStep2(); return; }
+  if (st.step === 3) { app.innerHTML = renderStep3(); return; }
+}
+
+function render() {
+  renderSteps();
+  renderApp();
+}
+
+/* ── STEP 1: Tenant type ─────────────────────────────────── */
+function renderStep1() {
+  return `
+  <div class="card">
+    <div class="card-title">What type of tenant are you?</div>
+    <div class="type-grid">
+      <div class="type-card ${st.tenantType === 'new' ? 'selected' : ''}" onclick="pick('new')">
+        <div class="type-icon">🆕</div>
+        <h3>New Tenant</h3>
+        <p>First deployment. All variables from the platform release tag will be listed — placeholders flagged for you to fill in.</p>
+      </div>
+      <div class="type-card ${st.tenantType === 'existing' ? 'selected' : ''}" onclick="pick('existing')">
+        <div class="type-icon">🔄</div>
+        <h3>Existing Tenant</h3>
+        <p>Upgrading an existing deployment. Upload both your current config and the new tag — only new and changed variables are highlighted.</p>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="goStep(2)" ${!st.tenantType ? 'disabled' : ''}>Continue →</button>
+    </div>
+  </div>
+  <div class="alert alert-info" style="margin-top:0">
+    <span>ℹ</span>
+    <span>All processing happens in your browser. No files leave your machine.</span>
+  </div>`;
+}
+
+/* ── STEP 2: Upload ──────────────────────────────────────── */
+function renderStep2() {
+  const isExisting = st.tenantType === 'existing';
+  const canGenerate = st.newFiles.length > 0 && (!isExisting || true); // old files optional but warned
+
+  function fileChips(target) {
+    return st[target].map(f => `
+      <div class="file-chip">
+        📄 ${esc(f.name)} (${f.vars.length}v)
+        <button onclick="removeFile('${target}','${esc(f.name)}')" title="Remove">✕</button>
+      </div>`).join('');
+  }
+
+  const oldSection = isExisting ? `
+    <div>
+      <div class="card-title">Your currently deployed files</div>
+      <div class="upload-zone" id="drop-old" onclick="document.getElementById('old-input').click()">
+        <input type="file" id="old-input" multiple accept=".sh" onchange="handleFiles(event,'oldFiles')">
+        <div class="upload-icon">📂</div>
+        <div class="upload-title">Current deployed <code>.sh</code> files</div>
+        <div class="upload-hint">Tenant.sh · TenantGroupAdmin.sh · TenantGroupCommon.sh · RECOMMENDED_VARIABLE.sh</div>
+        ${st.oldFiles.length ? `<div class="file-list">${fileChips('oldFiles')}</div>` : ''}
+      </div>
+    </div>` : '';
+
+  const missingOld = isExisting && !st.oldFiles.length && st.newFiles.length;
+
+  return `
+  <div class="card">
+    <div class="card-title">Upload configuration files</div>
+    <div class="${isExisting ? 'upload-grid' : ''}">
+      <div>
+        <div class="card-title">New platform release tag files</div>
+        <div class="upload-zone" id="drop-new" onclick="document.getElementById('new-input').click()">
+          <input type="file" id="new-input" multiple accept=".sh" onchange="handleFiles(event,'newFiles')">
+          <div class="upload-icon">📦</div>
+          <div class="upload-title">Platform tag <code>.sh</code> files <span style="color:var(--removed)">*</span></div>
+          <div class="upload-hint">Upload the files from <code>meg2-configs/env/STAGE/</code> and <code>meg2-configs/env/</code></div>
+          ${st.newFiles.length ? `<div class="file-list">${fileChips('newFiles')}</div>` : ''}
+        </div>
+      </div>
+      ${oldSection}
+    </div>
+
+    <div class="form-row" style="margin-top:.875rem">
+      <div class="form-field">
+        <label>Stage / environment name</label>
+        <input type="text" value="${esc(st.stageName)}" oninput="st.stageName=this.value" placeholder="dev · staging · prod">
+        <span class="hint">Added to the generated file header. Optional.</span>
+      </div>
+    </div>
+
+    ${missingOld ? `<div class="alert alert-warn"><span>⚠</span><span>No existing files uploaded — treating all variables as new for the comparison.</span></div>` : ''}
+
+    <div class="btn-row">
+      <button class="btn" onclick="goStep(1)">← Back</button>
+      <button class="btn btn-primary" onclick="generate()" ${!st.newFiles.length ? 'disabled' : ''}>
+        ⚡ Generate
+      </button>
+      ${!st.newFiles.length ? `<span style="font-size:.8rem;color:var(--text-3)">Upload at least one .sh file to continue</span>` : ''}
+    </div>
+  </div>`;
+}
+
+/* ── STEP 3: Results ─────────────────────────────────────── */
+function renderStep3() {
+  if (!st.results) return '<div class="empty">No results yet.</div>';
+  const r   = st.results;
+  const af  = r.files[st.activeTab] || r.files[0];
+  const isNew = st.tenantType === 'new';
+
+  /* Metrics */
+  const metrics = isNew
+    ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)">
+        <div class="metric m-new"><div class="num">${r.summary.newCount}</div><div class="lbl">Variables to configure</div></div>
+        <div class="metric m-unchanged"><div class="num">${r.files.length}</div><div class="lbl">Files generated</div></div>
+       </div>`
+    : `<div class="metrics">
+        <div class="metric m-new"><div class="num">${r.summary.newCount}</div><div class="lbl">New variables</div></div>
+        <div class="metric m-changed"><div class="num">${r.summary.changedCount}</div><div class="lbl">Changed</div></div>
+        <div class="metric m-unchanged"><div class="num">${r.summary.unchangedCount}</div><div class="lbl">Unchanged</div></div>
+        <div class="metric m-removed"><div class="num">${r.summary.removedCount}</div><div class="lbl">Removed</div></div>
+       </div>`;
+
+  /* Tabs */
+  const tabs = r.files.map((f, i) => `
+    <button class="tab ${st.activeTab === i ? 'active' : ''}" onclick="setTab(${i})">${esc(f.name)}</button>
+  `).join('');
+
+  /* Filter counts */
+  const counts = {
+    all:       af.variables.length,
+    new:       af.variables.filter(v => v.status === 'new').length,
+    changed:   af.variables.filter(v => v.status === 'changed').length,
+    unchanged: af.variables.filter(v => v.status === 'unchanged').length,
+    removed:   af.variables.filter(v => v.status === 'removed').length,
+  };
+  const filterBtns = (isNew
+    ? ['all','new']
+    : ['all','new','changed','unchanged','removed']
+  ).map(f =>
+    `<button class="filter-btn ${st.filter === f ? 'active' : ''}" onclick="setFilter('${f}')">${f[0].toUpperCase()+f.slice(1)} (${counts[f]})</button>`
+  ).join('');
+
+  /* Variable rows */
+  const filtered = st.filter === 'all'
+    ? af.variables
+    : af.variables.filter(v => v.status === st.filter);
+
+  const varRows = filtered.length
+    ? filtered.map(v => {
+        const badgeCls = { new:'badge-new', changed:'badge-changed', unchanged:'badge-unchanged', removed:'badge-removed' }[v.status];
+        const rowCls   = { new:'row-new', changed:'row-changed', removed:'row-removed' }[v.status] || '';
+        const ph       = HOLDS_PH.test(v.value) && v.status !== 'removed';
+        const valHtml  = ph
+          ? `<span class="placeholder">⚑ ${esc(v.value)}</span>`
+          : esc(v.value || '—');
+        return `
+        <div class="var-row ${rowCls}">
+          <div>
+            <div class="var-name">${esc(v.name)}</div>
+            ${v.comment ? `<div class="var-comment">${esc(v.comment.substring(0,70))}${v.comment.length>70?'…':''}</div>` : ''}
+          </div>
+          <div class="var-value">${valHtml}</div>
+          <div class="var-value">${esc(v.oldValue || '—')}</div>
+          <div><span class="badge ${badgeCls}">${v.status}</span></div>
+        </div>`;
+      }).join('')
+    : '<div class="empty">No variables match this filter.</div>';
+
+  /* Generated config */
+  const isCopied = st.copied === af.name;
+  const configHtml = highlightConfig(af.generated);
+
+  return `
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:.75rem;flex-wrap:wrap;margin-bottom:1rem">
+    <div>
+      <h2 style="font-size:1.1rem;font-weight:600;margin-bottom:.2rem">Results</h2>
+      <p style="font-size:.85rem;color:var(--text-2)">${r.files.length} file${r.files.length!==1?'s':''} · ${esc(st.stageName || 'no stage specified')} · ${st.tenantType} tenant</p>
+    </div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+      <button class="btn btn-sm" onclick="downloadAll()">⬇ Download all</button>
+      <button class="btn btn-sm" onclick="restart()">↺ Start over</button>
+    </div>
+  </div>
+
+  ${metrics}
+
+  <div class="card" style="padding:0;overflow:hidden">
+    <div class="tabs">${tabs}</div>
+    <div class="filter-bar">${filterBtns}</div>
+    <div class="var-table-wrap" style="border:none;border-radius:0">
+      <div class="var-table-head">
+        <div>Variable</div>
+        <div>${isNew ? 'Value (tag)' : 'New value'}</div>
+        <div>${isNew ? '' : 'Previous value'}</div>
+        <div>Status</div>
+      </div>
+      ${varRows}
+    </div>
+  </div>
+
+  <div class="config-pane">
+    <div class="config-pane-header">
+      <span class="config-pane-title">Generated: ${esc(af.name)}</span>
+      <div class="config-pane-actions">
+        <button class="btn btn-sm" onclick="copyConfig('${esc(af.name)}')">
+          ${isCopied ? '✓ Copied' : '⎘ Copy'}
+        </button>
+        <button class="btn btn-sm" onclick="downloadConfig('${esc(af.name)}')">
+          ⬇ Download
+        </button>
+      </div>
+    </div>
+    <div class="code-block">${configHtml}</div>
+  </div>`;
+}
+
+/* ── EVENT HANDLERS ──────────────────────────────────────── */
+window.pick      = t  => { st.tenantType = t; render(); };
+window.goStep    = n  => { st.step = n; render(); };
+window.setTab    = i  => { st.activeTab = i; st.filter = 'all'; render(); };
+window.setFilter = f  => { st.filter = f; render(); };
+window.restart   = () => { Object.assign(st, { step:1, tenantType:null, newFiles:[], oldFiles:[], stageName:'', results:null, activeTab:0, filter:'all', copied:null }); render(); };
+window.removeFile= (t,n) => removeFile(t,n);
+
+window.handleFiles = async (event, target) => {
+  await addFiles(event.target.files, target);
+};
+
+window.generate = () => {
+  computeResults();
+  st.step = 3;
+  render();
+};
+
+window.copyConfig = name => {
+  const f = st.results.files.find(f => f.name === name);
+  if (f) copyText(f.generated, name);
+};
+
+window.downloadConfig = name => {
+  const f = st.results.files.find(f => f.name === name);
+  if (f) downloadFile(f.generated, name);
+};
+
+window.downloadAll = () => {
+  if (!st.results) return;
+  // Tiny delay between downloads so browser doesn't block them
+  st.results.files.forEach((f, i) => {
+    setTimeout(() => downloadFile(f.generated, f.name), i * 120);
+  });
+};
+
+/* ── DRAG & DROP ─────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('dragover', e => e.preventDefault());
+  document.addEventListener('drop',     e => {
+    e.preventDefault();
+    const dropNew = document.getElementById('drop-new');
+    const dropOld = document.getElementById('drop-old');
+    if (dropNew && (dropNew === e.target || dropNew.contains(e.target)))
+      addFiles(e.dataTransfer.files, 'newFiles');
+    else if (dropOld && (dropOld === e.target || dropOld.contains(e.target)))
+      addFiles(e.dataTransfer.files, 'oldFiles');
+  });
+});
+
+/* ── BOOT ────────────────────────────────────────────────── */
+render();
+</script>
+</body>
+</html>
