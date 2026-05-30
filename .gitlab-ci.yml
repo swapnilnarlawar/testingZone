@@ -1,79 +1,116 @@
 # ─────────────────────────────────────────────────────────────
 # Config Generator v1 — GitLab CI/CD
 # ─────────────────────────────────────────────────────────────
-# Two jobs:
 #
-#   pages      — deploys public/index.html to GitLab Pages on push to main.
-#                Tenants visit the URL and process files in the browser.
+# Job 1 — pages
+#   Deploys public/index.html to GitLab Pages on every push to
+#   the default branch. Tenants browse to the Pages URL and
+#   process their .sh files entirely in the browser.
 #
-#   generate   — manually triggered Python job that fetches files from
-#                GitLab by tag and outputs annotated .sh files as artifacts.
-#                Triggered from: CI/CD → Pipelines → Run pipeline.
+# Job 2 — generate
+#   Manually triggered. Fetches .sh files from GitLab by tag,
+#   runs the Python diff/generator, and exposes the annotated
+#   output files as downloadable pipeline artifacts.
+#
+#   Trigger: CI/CD → Pipelines → Run pipeline, then set:
+#
+#     PLATFORM_PROJECT   group/tenant-deploy-pipelines
+#     TENANT_TYPE        new   OR   existing
+#     STAGE              dev   (or staging / prod / …)
+#     NEW_TAG            v2.4.1
+#     EXISTING_TAG       v2.3.0   (only when TENANT_TYPE=existing)
 #
 # Required CI/CD variable (Settings → CI/CD → Variables):
-#   GITLAB_TOKEN   GitLab PAT with read_repository scope (masked, protected)
-#
-# Pipeline trigger inputs (for the `generate` job):
-#   TENANT_TYPE      new | existing
-#   STAGE            dev | staging | prod | ...
-#   NEW_TAG          e.g. v2.4.1
-#   EXISTING_TAG     e.g. v2.3.0   (only required when TENANT_TYPE=existing)
-#   PLATFORM_PROJECT e.g. group/tenant-deploy-pipelines
+#   GITLAB_TOKEN   PAT with read_repository scope — mask it.
 # ─────────────────────────────────────────────────────────────
+
+# Prevent duplicate pipelines: run on branch pushes and on
+# manually triggered "Run pipeline" clicks only.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
 
 stages:
   - deploy
   - generate
 
-# ─── Job 1: Deploy web app to GitLab Pages ──────────────────
+# ── Job 1: GitLab Pages ──────────────────────────────────────
+# public/index.html already exists in the repo.
+# The Pages runner just needs to see it declared as an artifact.
+# Do NOT move or copy it — that breaks the artifact path.
 pages:
   stage: deploy
   image: alpine:3.19
   script:
-    # GitLab Pages requires the artifact to be in a directory called `public`
-    - cp -r public/ public_build/
-    - mv public_build public
+    - echo "Deploying public/index.html to GitLab Pages"
+    - ls -la public/           # confirm index.html is present
   artifacts:
     paths:
-      - public
+      - public                 # GitLab Pages requires this exact name
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
 
-# ─── Job 2: Generate configs via Python CLI ─────────────────
+# ── Job 2: Generate annotated configs ────────────────────────
 generate:
   stage: generate
   image: python:3.12-slim
+  # Run only when triggered manually ("Run pipeline") AND
+  # TENANT_TYPE has been provided. The correct GitLab CI syntax
+  # to test a variable is set/non-empty is just $VAR — NOT != null.
   rules:
-    # Only runs when triggered manually from the GitLab UI with TENANT_TYPE set
-    - if: $CI_PIPELINE_SOURCE == "web" && $TENANT_TYPE != null
-  variables:
-    GIT_STRATEGY: fetch
+    - if: '$CI_PIPELINE_SOURCE == "web" && $TENANT_TYPE'
   script:
-    - echo "Tenant type  = $TENANT_TYPE"
-    - echo "Stage        = $STAGE"
-    - echo "New tag      = $NEW_TAG"
-    - echo "Existing tag = ${EXISTING_TAG:-N/A}"
-    - echo "Project      = $PLATFORM_PROJECT"
-    - echo ""
+    # ── 1. Validate required inputs ──────────────────────────
     - |
-      ARGS="--gitlab ${CI_SERVER_URL} \
-            --project ${PLATFORM_PROJECT} \
-            --stage   ${STAGE} \
-            --new-tag ${NEW_TAG} \
-            --tenant-type ${TENANT_TYPE} \
-            --out ./generated"
+      fail=0
+      for VAR in PLATFORM_PROJECT TENANT_TYPE STAGE NEW_TAG; do
+        eval "val=\$$VAR"
+        if [ -z "$val" ]; then
+          echo "ERROR: pipeline variable $VAR is not set"
+          fail=1
+        fi
+      done
+      if [ "$TENANT_TYPE" = "existing" ] && [ -z "$EXISTING_TAG" ]; then
+        echo "ERROR: EXISTING_TAG is required when TENANT_TYPE=existing"
+        fail=1
+      fi
+      [ "$fail" = "1" ] && exit 1
 
+    # ── 2. Echo inputs so they appear in the job log ─────────
+    - echo "PLATFORM_PROJECT = $PLATFORM_PROJECT"
+    - echo "TENANT_TYPE      = $TENANT_TYPE"
+    - echo "STAGE            = $STAGE"
+    - echo "NEW_TAG          = $NEW_TAG"
+    - echo "EXISTING_TAG     = ${EXISTING_TAG:-(not set)}"
+    - echo ""
+
+    # ── 3. Run the generator ─────────────────────────────────
+    # Build the argument list explicitly — avoids word-splitting
+    # problems that come from building a string and eval-ing it.
+    - |
       if [ "$TENANT_TYPE" = "existing" ]; then
-        ARGS="$ARGS --existing-tag ${EXISTING_TAG}"
+        python scripts/generate_config.py \
+          --gitlab       "$CI_SERVER_URL" \
+          --project      "$PLATFORM_PROJECT" \
+          --stage        "$STAGE" \
+          --new-tag      "$NEW_TAG" \
+          --existing-tag "$EXISTING_TAG" \
+          --tenant-type  existing \
+          --out          ./generated
+      else
+        python scripts/generate_config.py \
+          --gitlab      "$CI_SERVER_URL" \
+          --project     "$PLATFORM_PROJECT" \
+          --stage       "$STAGE" \
+          --new-tag     "$NEW_TAG" \
+          --tenant-type new \
+          --out         ./generated
       fi
 
-      python scripts/generate_config.py $ARGS
   artifacts:
     name: "config-${TENANT_TYPE}-${STAGE}-${NEW_TAG}"
     paths:
       - generated/
     expose_as: "Generated configs"
     expire_in: 30 days
-  environment:
-    name: config-generation/$STAGE
-    action: prepare
