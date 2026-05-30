@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────────────────────
+# Config Generator v1 — GitLab CI/CD
+# ─────────────────────────────────────────────────────────────
+# Two jobs:
+#
+#   pages      — deploys public/index.html to GitLab Pages on push to main.
+#                Tenants visit the URL and process files in the browser.
+#
+#   generate   — manually triggered Python job that fetches files from
+#                GitLab by tag and outputs annotated .sh files as artifacts.
+#                Triggered from: CI/CD → Pipelines → Run pipeline.
+#
+# Required CI/CD variable (Settings → CI/CD → Variables):
+#   GITLAB_TOKEN   GitLab PAT with read_repository scope (masked, protected)
+#
+# Pipeline trigger inputs (for the `generate` job):
+#   TENANT_TYPE      new | existing
+#   STAGE            dev | staging | prod | ...
+#   NEW_TAG          e.g. v2.4.1
+#   EXISTING_TAG     e.g. v2.3.0   (only required when TENANT_TYPE=existing)
+#   PLATFORM_PROJECT e.g. group/tenant-deploy-pipelines
+# ─────────────────────────────────────────────────────────────
+
+stages:
+  - deploy
+  - generate
+
+# ─── Job 1: Deploy web app to GitLab Pages ──────────────────
+pages:
+  stage: deploy
+  image: alpine:3.19
+  script:
+    # GitLab Pages requires the artifact to be in a directory called `public`
+    - cp -r public/ public_build/
+    - mv public_build public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─── Job 2: Generate configs via Python CLI ─────────────────
+generate:
+  stage: generate
+  image: python:3.12-slim
+  rules:
+    # Only runs when triggered manually from the GitLab UI with TENANT_TYPE set
+    - if: $CI_PIPELINE_SOURCE == "web" && $TENANT_TYPE != null
+  variables:
+    GIT_STRATEGY: fetch
+  script:
+    - echo "Tenant type  = $TENANT_TYPE"
+    - echo "Stage        = $STAGE"
+    - echo "New tag      = $NEW_TAG"
+    - echo "Existing tag = ${EXISTING_TAG:-N/A}"
+    - echo "Project      = $PLATFORM_PROJECT"
+    - echo ""
+    - |
+      ARGS="--gitlab ${CI_SERVER_URL} \
+            --project ${PLATFORM_PROJECT} \
+            --stage   ${STAGE} \
+            --new-tag ${NEW_TAG} \
+            --tenant-type ${TENANT_TYPE} \
+            --out ./generated"
+
+      if [ "$TENANT_TYPE" = "existing" ]; then
+        ARGS="$ARGS --existing-tag ${EXISTING_TAG}"
+      fi
+
+      python scripts/generate_config.py $ARGS
+  artifacts:
+    name: "config-${TENANT_TYPE}-${STAGE}-${NEW_TAG}"
+    paths:
+      - generated/
+    expose_as: "Generated configs"
+    expire_in: 30 days
+  environment:
+    name: config-generation/$STAGE
+    action: prepare
