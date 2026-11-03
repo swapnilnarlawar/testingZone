@@ -1,0 +1,2 @@
+-r function_app/requirements.txt
+pytest>=8,<9

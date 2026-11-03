@@ -1,0 +1,5 @@
+# Runtime dependencies for the Azure Function (also used by scripts/).
+azure-functions>=1.21,<2
+azure-identity>=1.19,<2
+azure-keyvault-secrets>=4.9,<5
+requests>=2.32,<3

@@ -1,0 +1,26 @@
+name: Set up ops environment
+description: Install Python dependencies and log in to Azure as the UAMI via OIDC.
+inputs:
+  client-id:
+    required: true
+  tenant-id:
+    required: true
+  subscription-id:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: pip
+        cache-dependency-path: function_app/requirements.txt
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r scripts/requirements.txt
+    - name: Azure login (UAMI, OIDC)
+      uses: azure/login@v2
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}

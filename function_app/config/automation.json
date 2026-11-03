@@ -1,0 +1,20 @@
+{
+  "$comment": "Behaviour of the branch automation. See docs/CONFIGURATION.md for every key.",
+  "gitlab_url": "https://gitlab.com",
+  "source_repos": [
+    "my-group/backend",
+    "my-group/frontend"
+  ],
+  "target_repos": [
+    "my-group/backend",
+    "my-group/frontend",
+    "my-group/shared-config"
+  ],
+  "release_branch": "release",
+  "branch_name_template": "{username}/{project}-{iid}",
+  "comment_on_issue": true,
+  "excluded_assignees": [],
+  "gitlab_token_secret_name": "gitlab-api-token",
+  "webhook_secret_name": "gitlab-webhook-secret",
+  "previous_secret_grace_hours": 24
+}

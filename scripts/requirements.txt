@@ -1,0 +1,2 @@
+# The ops scripts share code and dependencies with the function app.
+-r ../function_app/requirements.txt

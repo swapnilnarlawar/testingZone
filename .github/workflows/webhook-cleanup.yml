@@ -1,0 +1,35 @@
+name: Webhook Cleanup
+
+on:
+  schedule:
+    - cron: '0 3 1 1,4,7,10 *'   # 1st of Jan/Apr/Jul/Oct 03:00 UTC (dry run)
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Actually delete the stale webhooks (otherwise dry run)
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write   # GitHub OIDC token for the UAMI login
+  contents: read
+
+concurrency:
+  group: webhook-ops
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      KEYVAULT_URL: ${{ vars.KEYVAULT_URL }}
+      WEBHOOK_URL: ${{ vars.WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-ops
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Webhook Cleanup
+        run: python scripts/webhooks.py cleanup ${{ (github.event_name == 'workflow_dispatch' && inputs.apply) && '--apply' || '' }} ${{ vars.CLEANUP_GROUP && format('--group {0}', vars.CLEANUP_GROUP) || '' }}

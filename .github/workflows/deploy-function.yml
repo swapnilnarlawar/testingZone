@@ -1,0 +1,62 @@
+name: Deploy Function
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'function_app/**'
+      - '.github/workflows/deploy-function.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # GitHub OIDC token for the UAMI login
+  contents: read
+
+concurrency:
+  group: deploy-function
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements-dev.txt
+      - run: pytest
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (UAMI, OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.FUNCTION_APP_NAME }}
+          package: function_app
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
+
+      - name: Smoke test
+        env:
+          WEBHOOK_URL: ${{ vars.WEBHOOK_URL }}
+        run: |
+          health="${WEBHOOK_URL%/gitlab-webhook}/health"
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$health" || true)
+            echo "Attempt $i: GET $health -> $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20
+          done
+          echo "Function did not become healthy" && exit 1
