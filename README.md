@@ -1,18 +1,18 @@
 # GitLab Branch Automation
 
-When a GitLab issue is assigned to someone, a branch is created for that person
-in each configured repository, cut from the release branch. The branches are
-posted back to the issue as a comment.
+When an issue anywhere in your GitLab group is assigned, a branch for that
+issue is created in each repository routed to it, cut from the release branch.
+The branches are posted back to the issue as a comment.
 
 ```
- GitLab issue assigned to @alice
+ Issue #42 in my-group/web assigned (to one person or several)
           │  Issue Hook (X-Gitlab-Token = webhook secret)
           ▼
  Azure Function  /api/gitlab-webhook ──── reads secrets ───► Azure Key Vault
           │       (runs as a User Assigned Managed Identity)
           │  GitLab API
           ▼
- alice/backend-42  created from `release` in every target repo
+ feature/web-42  created from `release` in every routed target repo
  + comment on the issue listing the branches
 ```
 
@@ -21,22 +21,30 @@ Supporting pieces:
 | Piece | What it does |
 |---|---|
 | `function_app/` | Azure Function (Python) that receives the webhook and creates the branches |
-| `function_app/config/automation.json` | **The one file you edit**: source repos, target repos, release branch, branch naming |
+| `function_app/config/automation.json` | **The one file you edit**: watched groups, routes to target repos, release branch, naming per repo |
 | `scripts/webhooks.py` | Ops CLI: store the GitLab token, create/verify/rotate/clean up webhooks |
 | `infra/` | Bicep template + `deploy.sh` that create every Azure resource |
-| `.github/workflows/` | CI, function deployment, and scheduled verify / rotate / cleanup jobs |
+| `.github/workflows/` | CI, function deployment, and scheduled sync / verify / rotate / cleanup jobs |
 | `docs/` | Deployment runbook, configuration reference, operations guide, troubleshooting |
 
 ## How it behaves
 
-* **Trigger**: an issue is opened with assignees, or people are added to an
-  issue's assignees. Only the *newly added* people get branches, so editing an
-  issue never re-creates anything. Unassigning does nothing.
-* **Branch name**: `{username}/{project}-{iid}` by default, for example
-  `alice/backend-42`. Configurable, see [CONFIGURATION.md](docs/CONFIGURATION.md).
+* **Watching**: every project in the configured GitLab groups (subgroups
+  included) gets a project webhook, minus any you exclude. A daily sync job adds
+  the webhook to newly created repos.
+* **Trigger**: an issue is opened with assignees, or someone is added to an
+  issue's assignees. Unassigning, closing and other edits do nothing.
+* **One branch per issue**: the name comes from the issue, never the assignee,
+  so multiple assignees share one branch per repo. A second assignee or a
+  reassignment finds the branch already there and nothing new is created.
+* **Where**: `routes` map source repos (or patterns such as `my-group/payments/*`)
+  to their own list of target repos; `{source}` means the issue's own repo.
+* **Branch name**: `feature/{project}-{iid}` by default, for example
+  `feature/web-42`, with per-target-repo overrides of the naming and the release
+  branch. See [CONFIGURATION.md](docs/CONFIGURATION.md).
 * **Source branch**: `release`, or a pattern like `release/*` to use the most
   recently updated matching branch in each repo.
-* **Existing branches** are left untouched and reported as "already existed".
+* **Existing branches** are never touched.
 * **Failures** in one repo never stop the others; every result is logged and
   listed in the issue comment.
 * **Security**: no secrets in code, GitHub, or app settings. The GitLab token
@@ -49,7 +57,7 @@ Supporting pieces:
 Full step-by-step instructions are in **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**. In short:
 
 ```bash
-# 1. Edit the repos and release branch
+# 1. Set your groups, routes and release branch
 $EDITOR function_app/config/automation.json
 
 # 2. Create the Azure resources (prints the GitHub secrets/variables to set)
@@ -67,15 +75,16 @@ python scripts/webhooks.py setup
 python scripts/webhooks.py verify
 ```
 
-Then assign an issue in one of the source repos and watch the branches appear.
+Then assign an issue in one of the watched repos and watch the branches appear.
 
 ## Scheduled jobs
 
 | Workflow | Schedule (UTC) | Action |
 |---|---|---|
-| Webhook Verification | Mondays 09:00 | Checks webhooks, release branches, and the function end to end |
+| Webhook Sync | Daily 06:00 | Adds the webhook to repos newly created in the watched groups, repairs disabled hooks |
+| Webhook Verification | Mondays 09:00 | Checks webhooks, routes, release branches, and the function end to end |
 | Secret Rotation | 1st of each month 02:00 | New webhook secret in Key Vault and on every webhook (old one valid 24h) |
-| Webhook Cleanup | 1st of Jan/Apr/Jul/Oct 03:00 | Lists stale or duplicate webhooks (deletes only when run manually with *apply*) |
+| Webhook Cleanup | 1st of Jan/Apr/Jul/Oct 03:00 | Lists webhooks on excluded repos and duplicates (deletes only when run manually with *apply*) |
 | Deploy Function | On push to `main` touching `function_app/` | Tests, deploys, smoke-tests |
 | CI | Every PR and push | Unit tests and config validation |
 

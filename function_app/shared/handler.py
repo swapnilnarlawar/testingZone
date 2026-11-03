@@ -82,20 +82,23 @@ class WebhookHandler:
         except ValueError:
             return 400, {"error": "body is not valid JSON"}
 
-        event = parse_assignment_event(payload, self.settings.excluded_assignees)
+        event = parse_assignment_event(payload)
         if event is None:
-            return 200, {"status": "ignored"}
+            return 200, {"status": "ignored", "reason": "not an assignment"}
+        issue = f"{event.project_path}#{event.issue_iid}"
+        if self.settings.is_excluded(event.project_path):
+            return 200, {"status": "ignored", "reason": "repo excluded", "issue": issue}
+        if not self.settings.targets_for(event.project_path):
+            logger.warning("No route matches %s; add one to automation.json", event.project_path)
+            return 200, {"status": "ignored", "reason": "no route for this repo", "issue": issue}
 
-        logger.info(
-            "Issue %s#%s assigned to %s",
-            event.project_path, event.issue_iid, ", ".join(a.username for a in event.new_assignees),
-        )
+        logger.info("Issue %s assigned to %s", issue, ", ".join(a.username for a in event.added))
         results = process_assignment(event, self.gitlab_factory(), self.settings)
         # Always 200 once authenticated: GitLab disables hooks that keep failing,
         # and per-branch failures are reported in the body, the logs and on the issue.
         return 200, {
             "status": "processed",
-            "issue": f"{event.project_path}#{event.issue_iid}",
+            "issue": issue,
             "results": [asdict(r) for r in results],
         }
 

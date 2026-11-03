@@ -44,15 +44,24 @@ Edit `function_app/config/automation.json`:
 ```json
 {
   "gitlab_url": "https://gitlab.com",
-  "source_repos": ["my-group/backend", "my-group/frontend"],
-  "target_repos": ["my-group/backend", "my-group/frontend", "my-group/shared-config"],
+  "source_groups": ["my-group"],
+  "exclude_repos": ["my-group/sandbox/*"],
+  "routes": [
+    { "source": "my-group/payments/*", "targets": ["{source}", "my-group/payments/payments-api"] },
+    { "source": "*",                   "targets": ["{source}", "my-group/backend", "my-group/frontend"] }
+  ],
   "release_branch": "release",
-  "branch_name_template": "{username}/{project}-{iid}"
+  "branch_name_template": "feature/{project}-{iid}"
 }
 ```
 
-* **source_repos**: repos where issues are created and assigned (they get the webhook).
-* **target_repos**: repos where the branches are created.
+* **source_groups**: every repo in these groups (subgroups included) is watched
+  for issue assignments. Use `source_repos` for extra individual repos and
+  `exclude_repos` to skip some.
+* **routes**: for an issue in a repo, the first matching route lists the repos
+  where its branch is created. `{source}` is the issue's own repo; keep `"*"` last as a catch-all.
+* **branch_name_template**: one branch per issue. `target_overrides` changes
+  the naming or release branch for specific target repos.
 * Paths are the full `group/subgroup/project` path as shown in the GitLab URL.
 
 All keys are described in [CONFIGURATION.md](CONFIGURATION.md). Commit the change.
@@ -106,7 +115,6 @@ script printed `gh` commands that do all of this; otherwise add them by hand.
 | `FUNCTION_APP_NAME` | Function App name |
 | `KEYVAULT_URL` | `https://kv-....vault.azure.net/` |
 | `WEBHOOK_URL` | `https://func-....azurewebsites.net/api/gitlab-webhook` |
-| `CLEANUP_GROUP` | *(optional)* GitLab group the cleanup job should scan for stale webhooks |
 
 ## 5. Deploy the function code
 
@@ -126,12 +134,13 @@ cp .env.example .env
 # edit .env: set KEYVAULT_URL and WEBHOOK_URL from the deploy output
 
 python scripts/webhooks.py store-token     # paste the token; it is validated, then stored
-python scripts/webhooks.py setup --dry-run # shows what will be created
+python scripts/webhooks.py setup --dry-run # lists every repo it will watch
 python scripts/webhooks.py setup           # generates the webhook secret and creates the webhooks
 ```
 
-`setup` generates a random webhook secret, writes it to Key Vault and to each
-webhook, and never prints it.
+`setup` lists every project in `source_groups` (plus `source_repos`, minus
+`exclude_repos`), generates a random webhook secret, writes it to Key Vault and
+to each webhook, and never prints it. Check the dry-run list before the real run.
 
 ## 7. Verify
 
@@ -142,23 +151,25 @@ python scripts/webhooks.py verify
 Every line should say `ok`, including the three function checks (liveness,
 rejects a bad token, deep health with Key Vault + GitLab access).
 
-Then do a real test: assign an issue in a source repo to yourself. Within a few
-seconds the branches exist in every target repo and a comment appears on the
-issue. You can also see the call under **Source repo → Settings → Webhooks →
+Then do a real test: assign an issue in a watched repo to yourself. Within a
+few seconds the branch exists in every routed target repo and a comment appears
+on the issue. Add a second assignee: nothing new is created. You can also see the call under **Source repo → Settings → Webhooks →
 Edit → Recent events**.
 
 ## 8. Done
 
-The scheduled workflows now keep things healthy: weekly verification, monthly
-secret rotation and quarterly cleanup reports. See [OPERATIONS.md](OPERATIONS.md).
+The scheduled workflows now keep things healthy: a daily sync that adds the
+webhook to new repos, weekly verification, monthly secret rotation and quarterly
+cleanup reports. See [OPERATIONS.md](OPERATIONS.md).
 
 ## Updating later
 
 | Change | What to do |
 |---|---|
-| Add/remove target repos, change release branch or naming | Edit `automation.json`, merge to `main` (auto-deploys) |
-| Add a source repo | Edit `automation.json`, merge, then run `python scripts/webhooks.py setup` (or wait for the next rotation) |
-| Remove a source repo | Edit `automation.json`, merge, then run the **Webhook Cleanup** workflow with *apply* |
+| Change routes, release branch or naming | Edit `automation.json`, merge to `main` (auto-deploys) |
+| New repo created in a watched group | Nothing: the daily **Webhook Sync** adds it. Run that workflow to cover it immediately |
+| Watch another group or repo | Add it to `source_groups`/`source_repos`, merge, run **Webhook Sync** |
+| Stop watching a repo | Add it to `exclude_repos`, merge, then run **Webhook Cleanup** with *apply* |
 | Renew the GitLab token | `python scripts/webhooks.py store-token` (picked up by the function within 5 minutes) |
 | Change Azure resources | Edit `infra/main.bicep`, re-run `infra/deploy.sh` with the same arguments |
 

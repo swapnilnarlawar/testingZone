@@ -31,8 +31,18 @@ def test_processes_assignment(settings, fake_gitlab):
 
 def test_ignores_non_assignment_and_bad_json(settings, fake_gitlab):
     handler = make_handler(settings, fake_gitlab, FakeStore({"gitlab-webhook-secret": ("s3cret", {})}))
-    assert handler.handle("s3cret", body({"object_kind": "note"})) == (200, {"status": "ignored"})
+    assert handler.handle("s3cret", body({"object_kind": "note"}))[1]["status"] == "ignored"
     assert handler.handle("s3cret", b"{not json")[0] == 400
+
+
+def test_ignores_excluded_and_unrouted_repos(settings, fake_gitlab):
+    handler = make_handler(settings, fake_gitlab, FakeStore({"gitlab-webhook-secret": ("s3cret", {})}))
+    _, result = handler.handle("s3cret", body(issue_payload("open", assignees=["a"], project="grp/sandbox/x")))
+    assert result["reason"] == "repo excluded"
+    settings.routes = [{"source": "other/*", "targets": ["other/x"]}]
+    _, result = handler.handle("s3cret", body(issue_payload("open", assignees=["a"])))
+    assert result["reason"] == "no route for this repo"
+    assert fake_gitlab.created == []
 
 
 def test_picks_up_rotated_secret_without_restart(settings, fake_gitlab):

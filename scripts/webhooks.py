@@ -3,7 +3,8 @@
 
 Commands
   store-token  Save the GitLab API token in Key Vault (prompted, never echoed)
-  setup        Create the webhook secret if missing and create/update webhooks
+  setup        Create the webhook secret if missing and add the webhook to every
+               watched repo (all projects in source_groups + source_repos)
   verify       Check webhooks, target repos and the Azure Function end to end
   rotate       Generate a new webhook secret and push it to every webhook
   cleanup      Remove stale or duplicate webhooks (dry run unless --apply)
@@ -103,22 +104,71 @@ def matching_hooks(gitlab: GitLabClient, repo: str, urls: set[str]) -> list[dict
     return sorted((h for h in gitlab.list_hooks(repo) if h.get("url") in urls), key=lambda h: h["id"])
 
 
-def sync_hooks(gitlab: GitLabClient, settings: Settings, secret: str, report: Report, dry_run: bool = False) -> None:
-    """Make sure every source repo has exactly one webhook to WEBHOOK_URL using ``secret``."""
+def group_projects(gitlab: GitLabClient, groups: list[str], report: Report) -> dict[str, str]:
+    """All non-archived projects in ``groups`` (subgroups included), keyed by lower-case path."""
+    found: dict[str, str] = {}
+    for group in groups:
+        try:
+            for project in gitlab.list_group_projects(group):
+                path = project["path_with_namespace"]
+                found.setdefault(path.lower(), path)
+        except GitLabError as exc:
+            report.add(f"group {group}", "error", exc.message, failure=True)
+    return found
+
+
+def watched_repos(gitlab: GitLabClient, settings: Settings, report: Report) -> list[str]:
+    """Repos that should have the webhook: every project in source_groups plus
+    source_repos, minus exclude_repos. New projects in a group are picked up
+    automatically the next time this runs."""
+    repos = group_projects(gitlab, settings.source_groups, report)
     for repo in settings.source_repos:
+        repos.setdefault(repo.lower(), repo)
+    return sorted(path for path in repos.values() if not settings.is_excluded(path))
+
+
+def hook_problems(hook: dict) -> list[str]:
+    problems = []
+    if not hook.get("issues_events"):
+        problems.append("issue events off")
+    if hook.get("alert_status") in {"disabled", "temporarily_disabled"}:
+        problems.append(f"hook {hook['alert_status']}")
+    return problems
+
+
+def sync_hooks(gitlab: GitLabClient, settings: Settings, repos: list[str], secret: str, report: Report,
+               force_update: bool = False, dry_run: bool = False) -> None:
+    """Make sure every watched repo has a webhook to WEBHOOK_URL.
+
+    Missing hooks are created; existing hooks are updated when misconfigured
+    or disabled, or always when ``force_update`` is set (secret rotation).
+    """
+    for repo in repos:
         try:
             hooks = matching_hooks(gitlab, repo, {settings.webhook_url})
-            if dry_run:
-                report.add(repo, "would update" if hooks else "would create")
-            elif hooks:
-                gitlab.update_hook(repo, hooks[0]["id"], settings.webhook_url, secret)
-                extra = f"{len(hooks) - 1} duplicate(s), run cleanup" if len(hooks) > 1 else ""
-                report.add(repo, f"updated hook {hooks[0]['id']}", extra)
+            extra = f"{len(hooks) - 1} duplicate(s), run cleanup" if len(hooks) > 1 else ""
+            if not hooks:
+                if dry_run:
+                    report.add(repo, "would create hook")
+                else:
+                    hook = gitlab.create_hook(repo, settings.webhook_url, secret)
+                    report.add(repo, f"created hook {hook['id']}")
+                continue
+            problems = hook_problems(hooks[0])
+            if not (force_update or problems):
+                report.add(repo, "hook ok", extra)
+            elif dry_run:
+                report.add(repo, "would update hook", ", ".join(problems))
             else:
-                hook = gitlab.create_hook(repo, settings.webhook_url, secret)
-                report.add(repo, f"created hook {hook['id']}")
+                gitlab.update_hook(repo, hooks[0]["id"], settings.webhook_url, secret)
+                report.add(repo, f"updated hook {hooks[0]['id']}", ", ".join(problems + ([extra] if extra else [])))
         except GitLabError as exc:
             report.add(repo, "error", exc.message, failure=True)
+
+
+def require_sources(settings: Settings) -> None:
+    if not (settings.source_groups or settings.source_repos):
+        raise ValueError("Set source_groups and/or source_repos in automation.json")
 
 
 # --------------------------------------------------------------------------- commands
@@ -141,10 +191,11 @@ def cmd_store_token(settings: Settings, args) -> int:
 
 
 def cmd_setup(settings: Settings, args) -> int:
-    settings.require("webhook_url", "source_repos")
+    settings.require("webhook_url")
+    require_sources(settings)
     store = get_store(settings)
     gitlab = get_gitlab(settings, store)
-    report = Report("Webhook setup")
+    report = Report("Webhook sync" + (" (dry run)" if args.dry_run else ""))
 
     secret = store.get(settings.webhook_secret_name)
     if secret is None:
@@ -158,12 +209,15 @@ def cmd_setup(settings: Settings, args) -> int:
     else:
         report.add("Key Vault", f"using existing secret '{settings.webhook_secret_name}'")
 
-    sync_hooks(gitlab, settings, secret, report, dry_run=args.dry_run)
+    repos = watched_repos(gitlab, settings, report)
+    report.add("watched repos", str(len(repos)))
+    sync_hooks(gitlab, settings, repos, secret, report, force_update=args.force_update, dry_run=args.dry_run)
     return report.finish()
 
 
 def cmd_rotate(settings: Settings, args) -> int:
-    settings.require("webhook_url", "source_repos")
+    settings.require("webhook_url")
+    require_sources(settings)
     store = get_store(settings)
     gitlab = get_gitlab(settings, store)
     report = Report("Webhook secret rotation")
@@ -181,15 +235,16 @@ def cmd_rotate(settings: Settings, args) -> int:
     store.set(settings.webhook_secret_name, secret, tags={"rotated_at": stamp.isoformat()})
     report.add("Key Vault", f"new secret stored in '{settings.webhook_secret_name}'")
 
-    sync_hooks(gitlab, settings, secret, report)
+    sync_hooks(gitlab, settings, watched_repos(gitlab, settings, report), secret, report, force_update=True)
     if report.failed:
-        print("Some webhooks were not updated. Fix the errors and re-run 'rotate' or 'setup' "
+        print("Some webhooks were not updated. Fix the errors and re-run 'rotate' or 'setup --force-update' "
               f"before the {grace}h grace period ends.")
     return report.finish()
 
 
 def cmd_verify(settings: Settings, args) -> int:
-    settings.require("webhook_url", "source_repos", "target_repos")
+    settings.require("webhook_url", "routes")
+    require_sources(settings)
     store = get_store(settings)
     gitlab = get_gitlab(settings, store)
     report = Report("Webhook verification")
@@ -201,29 +256,31 @@ def cmd_verify(settings: Settings, args) -> int:
         report.add("GitLab token", "invalid", exc.message, failure=True)
         return report.finish()
 
-    for repo in settings.source_repos:
+    repos = watched_repos(gitlab, settings, report)
+    targets: dict[str, None] = {}
+    for repo in repos:
+        routed = settings.targets_for(repo)
+        for target in routed:
+            targets.setdefault(target, None)
         try:
             hooks = matching_hooks(gitlab, repo, {settings.webhook_url})
         except GitLabError as exc:
             report.add(f"source {repo}", "error", exc.message, failure=True)
             continue
         if not hooks:
-            report.add(f"source {repo}", "webhook missing", "run setup", failure=True)
+            report.add(f"source {repo}", "webhook missing", "new repo? run setup (the daily sync adds it)",
+                       failure=True)
             continue
-        hook = hooks[0]
-        problems = []
-        if not hook.get("issues_events"):
-            problems.append("issue events off")
-        if hook.get("alert_status") in {"disabled", "temporarily_disabled"}:
-            problems.append(f"hook {hook['alert_status']}")
-        if len(hooks) > 1:
-            problems.append(f"{len(hooks)} duplicate hooks")
+        problems = hook_problems(hooks[0]) + ([f"{len(hooks)} duplicate hooks"] if len(hooks) > 1 else [])
+        if not routed:
+            problems.append("no route matches, issues here create no branches")
         report.add(f"source {repo}", "webhook problem" if problems else "webhook ok", ", ".join(problems),
                    failure=bool(problems))
 
-    for repo in settings.target_repos:
+    for repo in targets:
+        release, _ = settings.target_settings(repo)
         try:
-            ref = gitlab.resolve_ref(repo, settings.release_branch)
+            ref = gitlab.resolve_ref(repo, release)
             report.add(f"target {repo}", f"release branch ok ({ref})")
         except GitLabError as exc:
             report.add(f"target {repo}", "release branch problem", exc.message, failure=True)
@@ -263,14 +320,11 @@ def cmd_cleanup(settings: Settings, args) -> int:
     report = Report("Webhook cleanup" + ("" if args.apply else " (dry run)"))
 
     urls = {settings.webhook_url, *args.legacy_url}
-    keep_repos = set() if args.remove_all else {r.lower() for r in settings.source_repos}
-    repos = {r.lower(): r for r in [*settings.source_repos, *args.repo]}
-    for group in args.group:
-        try:
-            for project in gitlab.list_group_projects(group):
-                repos.setdefault(project["path_with_namespace"].lower(), project["path_with_namespace"])
-        except GitLabError as exc:
-            report.add(f"group {group}", "error", exc.message, failure=True)
+    keep = set() if args.remove_all else {r.lower() for r in watched_repos(gitlab, settings, report)}
+    # Scan the configured groups (excluded repos included), extra groups and repos.
+    repos = group_projects(gitlab, [*settings.source_groups, *args.group], report)
+    for repo in [*settings.source_repos, *args.repo]:
+        repos.setdefault(repo.lower(), repo)
 
     for key, repo in sorted(repos.items()):
         try:
@@ -278,15 +332,18 @@ def cmd_cleanup(settings: Settings, args) -> int:
         except GitLabError as exc:
             report.add(repo, "error", exc.message, failure=True)
             continue
-        if key in keep_repos:
+        if key in keep:
             # Keep the oldest hook pointing at the current URL, remove legacy URLs and duplicates.
             current = [h for h in hooks if h["url"] == settings.webhook_url]
             stale = [h for h in hooks if h not in current[:1]]
         else:
             stale = hooks
         for hook in stale:
-            reason = "not a source repo" if key not in keep_repos else (
-                "duplicate" if hook["url"] == settings.webhook_url else "legacy URL")
+            if key not in keep:
+                reason = "teardown" if args.remove_all else (
+                    "repo excluded" if settings.is_excluded(repo) else "repo no longer watched")
+            else:
+                reason = "duplicate" if hook["url"] == settings.webhook_url else "legacy URL"
             if args.apply:
                 try:
                     gitlab.delete_hook(repo, hook["id"])
@@ -295,7 +352,7 @@ def cmd_cleanup(settings: Settings, args) -> int:
                     report.add(repo, f"delete hook {hook['id']} failed", exc.message, failure=True)
             else:
                 report.add(repo, f"would delete hook {hook['id']}", reason)
-    if not report.rows:
+    if not any(r[1].startswith(("would", "deleted", "delete")) for r in report.rows):
         report.add("all repos", "nothing to clean up")
     return report.finish()
 
@@ -309,8 +366,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("store-token", help="save the GitLab API token in Key Vault")
     p.add_argument("--from-env", action="store_true", help="read the token from GITLAB_TOKEN instead of prompting")
 
-    p = sub.add_parser("setup", help="create/update webhooks on all source repos")
+    p = sub.add_parser("setup", help="add the webhook to every watched repo (safe to re-run)")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force-update", action="store_true", help="re-write every hook with the current secret")
 
     sub.add_parser("verify", help="check webhooks, release branches and the function").add_argument(
         "--skip-endpoint", action="store_true", help="do not call the Azure Function")
@@ -320,7 +378,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("cleanup", help="remove stale or duplicate webhooks")
     p.add_argument("--apply", action="store_true", help="actually delete (default is a dry run)")
-    p.add_argument("--group", action="append", default=[], help="also scan every project in this group")
+    p.add_argument("--group", action="append", default=[], help="also scan every project in this extra group")
     p.add_argument("--repo", action="append", default=[], help="also scan this project path")
     p.add_argument("--legacy-url", action="append", default=[], help="old webhook URL to remove everywhere")
     p.add_argument("--remove-all", action="store_true", help="remove the webhooks from source repos too (teardown)")

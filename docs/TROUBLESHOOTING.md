@@ -6,22 +6,25 @@ Start with `python scripts/webhooks.py verify`; it pinpoints most problems.
 
 1. **Was the webhook called?** Source repo → Settings → Webhooks → Edit →
    *Recent events*.
-   * No event: the repo is not in `source_repos` or `setup` was not run.
-     Run `python scripts/webhooks.py setup`.
+   * No webhook at all: the repo is new (the daily sync has not run yet), is
+     not in `source_groups`/`source_repos`, or matches `exclude_repos`. Run the
+     **Webhook Sync** workflow or `python scripts/webhooks.py setup`.
    * Response **401**: the webhook's secret does not match Key Vault. Run
-     `python scripts/webhooks.py setup` to re-sync it.
+     `python scripts/webhooks.py setup --force-update` to re-sync it.
    * Response **5xx** or timeout: see "Function errors" below.
-   * Response **200 `{"status": "ignored"}`**: the event was not an assignment.
-     Only *opening an issue with assignees* or *adding assignees* triggers it;
-     unassigning, editing other fields and closing are ignored, as are users in
-     `excluded_assignees`.
+   * Response **200 `{"status": "ignored"}`**: the `reason` says why.
+     `not an assignment`: only *opening an issue with assignees* or *adding
+     assignees* triggers it. `repo excluded`: the repo matches `exclude_repos`.
+     `no route for this repo`: add a route (or a `"*"` catch-all) to `routes`.
+   * Response **200** with every result `exists`: the issue already had its
+     branches (for example a second assignee was added). This is expected.
 2. **Response 200 with `"failed"` results**: the `detail` field says why.
    Common ones:
 
 | Detail | Fix |
 |---|---|
 | `Branch 'release' not found in grp/repo` | Create the release branch in that repo, or change `release_branch` |
-| `404 Project Not Found` | Wrong path in `target_repos`, or the token cannot see the project |
+| `404 Project Not Found` | Wrong path in a route's `targets`, or the token cannot see the project |
 | `403 Forbidden` | The token's user needs Developer (or higher) on the target repo, or a protected-branch rule blocks the name |
 | `Invalid reference name` | The template produced an odd name; check `branch_name_template` |
 
@@ -84,12 +87,18 @@ Look at Application Insights → *Failures*, or *Log stream*. Typical causes:
 The body names the failing check. `gitlab: error: ... 401` means the stored
 GitLab token is invalid or expired; run `store-token` with a new token.
 
-## Branches created twice / for the wrong person
+## An issue got two differently named branches
 
-Each assignment event only creates branches for people *added* in that event,
-and existing branches are never touched. If you see duplicates with different
-names, two templates were in use (for example the template changed between
-assignments).
+Branches are per issue and named from the issue only, so repeated assignments
+reuse the same branch. Two names for one issue mean the name inputs changed
+between assignments: the template was edited, or the template uses
+`{title_slug}` and the issue was renamed. Delete the unwanted branch; consider
+dropping `{title_slug}` if titles change often.
+
+## Two issues collide on the same branch name
+
+Issues from different repos routed to the same target can share an issue
+number. Include `{project}` in the template (the default does) or use `{id}`.
 
 ## Self-managed GitLab with a private CA
 

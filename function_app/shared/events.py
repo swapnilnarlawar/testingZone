@@ -1,11 +1,15 @@
 """Turn a GitLab "Issue Hook" payload into an assignment event.
 
-Only two situations count as an assignment:
+Two situations count as an assignment:
 
 * an issue is opened with one or more assignees (``action == "open"``)
-* an issue is updated and its assignee list gained people (``action == "update"``
-  with ``changes.assignees``); only the *newly added* people are returned, so
-  re-saving an issue never re-creates branches for existing assignees.
+* an issue is updated and people were added to its assignees (``action ==
+  "update"`` with ``changes.assignees`` gaining someone)
+
+Branches are created once per issue, not per assignee, and their names do not
+depend on who is assigned. So a second, third ... assignee, or a reassignment,
+finds the branches already there and nothing new is created. Unassigning,
+closing and other edits are ignored.
 """
 
 from __future__ import annotations
@@ -28,7 +32,8 @@ class AssignmentEvent:
     issue_iid: int
     issue_title: str
     issue_url: str
-    new_assignees: tuple[Assignee, ...]
+    assignees: tuple[Assignee, ...]  # everyone assigned after this event
+    added: tuple[Assignee, ...]      # who was added by this event
 
 
 def _to_assignee(user: dict) -> Assignee | None:
@@ -41,7 +46,11 @@ def _key(user: dict):
     return user.get("id") if user.get("id") is not None else user.get("username")
 
 
-def parse_assignment_event(payload: dict, excluded: list[str] | None = None) -> AssignmentEvent | None:
+def _assignees(users) -> tuple[Assignee, ...]:
+    return tuple(a for a in (_to_assignee(u) for u in users or []) if a)
+
+
+def parse_assignment_event(payload: dict) -> AssignmentEvent | None:
     """Return the assignment event, or ``None`` if the payload should be ignored."""
     if not isinstance(payload, dict) or payload.get("object_kind") != "issue":
         return None
@@ -50,21 +59,20 @@ def parse_assignment_event(payload: dict, excluded: list[str] | None = None) -> 
     action = attrs.get("action")
 
     if action == "open":
-        added = payload.get("assignees") or []
+        current = payload.get("assignees") or []
+        added = current
     elif action == "update":
         change = (payload.get("changes") or {}).get("assignees")
         if not change:
             return None
+        current = change.get("current") or []
         previous = {_key(u) for u in change.get("previous") or []}
-        added = [u for u in change.get("current") or [] if _key(u) not in previous]
+        added = [u for u in current if _key(u) not in previous]
     else:
         return None
 
-    excluded_set = {u.lower() for u in (excluded or [])}
-    assignees = tuple(
-        a for a in (_to_assignee(u) for u in added) if a and a.username.lower() not in excluded_set
-    )
-    if not assignees:
+    added_assignees = _assignees(added)
+    if not added_assignees:
         return None
 
     project = payload.get("project") or {}
@@ -75,5 +83,6 @@ def parse_assignment_event(payload: dict, excluded: list[str] | None = None) -> 
         issue_iid=attrs.get("iid"),
         issue_title=attrs.get("title") or "",
         issue_url=attrs.get("url") or "",
-        new_assignees=assignees,
+        assignees=_assignees(current),
+        added=added_assignees,
     )

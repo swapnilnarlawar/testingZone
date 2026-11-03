@@ -1,19 +1,37 @@
 {
   "$comment": "Behaviour of the branch automation. See docs/CONFIGURATION.md for every key.",
+
   "gitlab_url": "https://gitlab.com",
-  "source_repos": [
-    "my-group/backend",
-    "my-group/frontend"
+
+  "source_groups": ["my-group"],
+  "source_repos": [],
+  "exclude_repos": ["my-group/sandbox/*", "my-group/archived-*"],
+
+  "routes": [
+    {
+      "source": "my-group/payments/*",
+      "targets": ["{source}", "my-group/payments/payments-api", "my-group/shared-config"]
+    },
+    {
+      "source": "*",
+      "targets": ["{source}", "my-group/backend", "my-group/frontend"]
+    }
   ],
-  "target_repos": [
-    "my-group/backend",
-    "my-group/frontend",
-    "my-group/shared-config"
-  ],
+
   "release_branch": "release",
-  "branch_name_template": "{username}/{project}-{iid}",
+  "branch_name_template": "feature/{project}-{iid}",
+
+  "target_overrides": {
+    "my-group/shared-config": {
+      "branch_name_template": "issue/{group}-{project}-{iid}"
+    },
+    "my-group/legacy/*": {
+      "release_branch": "release/*",
+      "branch_name_template": "{iid}-{title_slug}"
+    }
+  },
+
   "comment_on_issue": true,
-  "excluded_assignees": [],
   "gitlab_token_secret_name": "gitlab-api-token",
   "webhook_secret_name": "gitlab-webhook-secret",
   "previous_secret_grace_hours": 24

@@ -32,4 +32,4 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Webhook Cleanup
-        run: python scripts/webhooks.py cleanup ${{ (github.event_name == 'workflow_dispatch' && inputs.apply) && '--apply' || '' }} ${{ vars.CLEANUP_GROUP && format('--group {0}', vars.CLEANUP_GROUP) || '' }}
+        run: python scripts/webhooks.py cleanup ${{ (github.event_name == 'workflow_dispatch' && inputs.apply) && '--apply' || '' }}
